@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Install in Android
+Name[ru]=Установить в Android
+Comment=Install the Android app (APK) with Droidloom
+Comment[ru]=Установить Android-приложение (APK) через Droidloom
+TryExec=/usr/bin/droidloomctl
+Exec=/usr/bin/droidloomctl install --notify %f
+Icon=application-vnd.android.package-archive
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+MimeType=application/vnd.android.package-archive;

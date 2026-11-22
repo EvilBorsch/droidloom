@@ -20,10 +20,13 @@ which is upstream's release @PKGVER@-@PKGREL@, commit
 
 @HOST_CHANGES@
 
-Three of them change what a person sees. An application launched while
+Four of them change what a person sees. An application launched while
 Droidloom is stopped (a launcher icon, or droidloomctl launch) starts
 Droidloom as droidloomctl start does, waits for Android and then opens; this
-does not enable droidloom.service for the next session. The launcher entries
+does not enable droidloom.service for the next session. droidloomctl
+install does the same, and where Droidloom was never set up it sets it up
+first, asking for administrator authentication as droidloomctl start does;
+it then names the app it installed or updated. The launcher entries
 of Android's own applications (packages com.android.*) are named with
 "(Android)" after Android's label, "Settings (Android)", so they are not
 taken for the host's Settings and Files. Android counts as ready only once
@@ -31,14 +34,19 @@ its user 0 is unlocked: Android reports its boot completed a moment before
 that, and an application that is not direct-boot aware, such as Files
 (Android), launched in that moment failed with "Activity start failed: -92".
 
-One file is this packaging's own, not upstream's:
-/usr/lib/udev/rules.d/60-droidloom-loop.rules. Android's system images and
+Two files are this packaging's own, not upstream's.
+/usr/lib/udev/rules.d/60-droidloom-loop.rules: Android's system images and
 APEX packages are mounted through loop devices, about fifty of them, and
 udisks offered each to file managers as a volume ("959 MB Volume"). The rule
 marks the loop devices whose file is Droidloom's or Android's with
 UDISKS_IGNORE=1; other loop devices are not touched. Installing the package
 makes a running udev read the rule and apply it to the loop devices there
-are.
+are. /usr/share/applications/droidloom-install-apk.desktop ("Install in
+Android"): opening an APK file runs droidloomctl install --notify FILE,
+whose desktop notification follows the start, the setup and the install,
+and ends with the app's name or why it failed. It is one application for
+application/vnd.android.package-archive among others (File Roller's);
+the desktop's mimeapps.list says which one opens APK files.
 
 The build recipe is docs/EB-BUILD.md in that repository (branch eb/main).
 
