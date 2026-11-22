@@ -3,7 +3,7 @@ Version: @DEB_VERSION@
 Architecture: arm64
 Maintainer: EvilBorsch <44337169+EvilBorsch@users.noreply.github.com>
 Installed-Size: @INSTALLED_SIZE@
-Depends: droidloom-image (>= @PKGVER@-@PKGREL@~), droidloom-image (<< @PKGVER@-@NEXT_PKGREL@~), libc6 (>= 2.39), libgcc-s1, libgbm1, libxkbcommon0, libwayland-server0, libpipewire-0.3-0t64, libpam0g, libvulkan1, systemd (>= 254), pipewire, polkitd, pkexec, util-linux, mount, coreutils, iproute2, nftables, e2fsprogs, tar, zstd
+Depends: droidloom-image (>= @PKGVER@-@PKGREL@~), droidloom-image (<< @PKGVER@-@NEXT_PKGREL@~), libc6 (>= @LIBC_VERSION@), libgcc-s1, libgbm1, libxkbcommon0, libwayland-server0, libpipewire-0.3-0t64, libpam0g, libvulkan1, systemd (>= 254), pipewire, polkitd, pkexec, util-linux, mount, coreutils, iproute2, nftables, e2fsprogs, tar, zstd
 Recommends: wireplumber, iptables, adb
 Suggests: rsync
 Section: misc
@@ -16,5 +16,8 @@ Description: Android apps in native Wayland windows (Droidloom runtime)
  Wayland presenter, the application catalog, audio, device and GPU brokers,
  droidloomctl, the setup helper and the systemd units.
  .
- Repacked unchanged from the upstream Arch Linux ARM package
- droidloom-runtime @PKGVER@-@PKGREL@ (commit @COMMIT@).
+ The programs are built from commit @HOST_COMMIT@
+ of https://github.com/EvilBorsch/droidloom, which is upstream release
+ @PKGVER@-@PKGREL@ (commit @COMMIT@)
+ with fixes for Debian and Ubuntu. All other files are repacked unchanged
+ from the upstream Arch Linux ARM package droidloom-runtime @PKGVER@-@PKGREL@.

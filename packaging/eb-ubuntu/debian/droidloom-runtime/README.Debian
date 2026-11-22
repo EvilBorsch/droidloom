@@ -1,11 +1,27 @@
 Droidloom on the erhai Ubuntu distribution
 ==========================================
 
-These packages are the upstream Arch Linux ARM packages repacked unchanged:
-droidloom-runtime (host programs), droidloom-image (Android vendor image and
-framework overrides) and droidloom-base (AOSP system, system_ext and product
-images). Runtime and image always come from the same upstream release; the
-image names the base release it needs.
+Three packages make up Droidloom: droidloom-runtime (host programs),
+droidloom-image (Android vendor image and framework overrides) and
+droidloom-base (AOSP system, system_ext and product images). Runtime and
+image always come from the same upstream release; the image names the base
+release it needs.
+
+droidloom-image and droidloom-base are the upstream Arch Linux ARM packages
+repacked unchanged. droidloom-runtime holds upstream's files too, except its
+programs (/usr/bin/droidloom* and /usr/lib/droidloom/droidloom-package-helper):
+they are built for Ubuntu 26.04 arm64 from
+
+    https://github.com/EvilBorsch/droidloom
+    commit @HOST_COMMIT@
+
+which is upstream's release @PKGVER@-@PKGREL@, commit
+@COMMIT@, with these changes:
+
+@HOST_CHANGES@
+
+The build recipe is docs/EB-BUILD.md in that repository (branch
+eb/ubuntu-packaging).
 
 The kernel needs Binder with binderfs, EROFS with LZ4, policy routing and the
 other options listed in the research report (research/droidloom/README.md in

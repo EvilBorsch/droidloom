@@ -6,7 +6,11 @@ check-archive.py guard PKG.pkg.tar.zst
     user: extended attributes, hard links, device nodes or FIFOs,
     setuid/setgid/sticky modes, and owners other than root.
 
-check-archive.py verify PKG.pkg.tar.zst PKG.deb
+check-archive.py elves PKG.pkg.tar.zst
+    Lists the ELF files (regular files that start with \\x7fELF) of the
+    upstream package, one path per line: the programs a rebuild replaces.
+
+check-archive.py verify PKG.pkg.tar.zst PKG.deb [REPLACED]
     Proves the repack changed nothing: every regular file and symlink the
     upstream .MTREE lists is in the .deb with the same SHA-256 (or link
     target) and mode, except the pacman hooks, which are dropped on purpose,
@@ -14,10 +18,16 @@ check-archive.py verify PKG.pkg.tar.zst PKG.deb
     /usr/share/doc/PKG/licenses. The only other files allowed in the .deb are
     the Debian copyright, changelog and README.Debian.
 
+    REPLACED is a directory laid out like the package's root (the output of
+    tools/eb-build-runtime). Each file in it must stand for a regular file
+    upstream ships at the same path, and the .deb must hold that file's
+    content, with upstream's mode, instead of upstream's.
+
 Run with python3 -I. Only reads the archives; writes nothing.
 """
 import gzip
 import hashlib
+import os
 import subprocess
 import sys
 import tarfile
@@ -49,6 +59,38 @@ def guard(path):
     if problems:
         sys.exit("cannot repack faithfully:\n  " + "\n  ".join(problems))
     print(f"guard ok: {path}")
+
+
+def elves(path):
+    process, archive = open_zstd_tar(path)
+    names = []
+    for member in archive:
+        if member.isfile() and archive.extractfile(member).read(4) == b"\x7fELF":
+            names.append(member.name[2:] if member.name.startswith("./") else member.name)
+    finish(process)
+    print("\n".join(sorted(names)))
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def replacements(root):
+    """Maps each file below root, as a package path, to its SHA-256."""
+    found = {}
+    for directory, _, files in os.walk(root):
+        for name in files:
+            path = os.path.join(directory, name)
+            if os.path.islink(path) or not os.path.isfile(path):
+                sys.exit(f"replacement is not a regular file: {path}")
+            found[os.path.relpath(path, root)] = sha256_file(path)
+    if not found:
+        sys.exit(f"no replacement files in {root}")
+    return found
 
 
 def unvis(text):
@@ -125,9 +167,11 @@ def deb_members(path):
     return members
 
 
-def verify(upstream, deb):
+def verify(upstream, deb, replaced_root=None):
     pkgname, entries = read_mtree(upstream)
     members = deb_members(deb)
+    replaced = replacements(replaced_root) if replaced_root else {}
+    replaced_count = 0
     licenses = f"usr/share/licenses/{pkgname}/"
     doc = f"usr/share/doc/{pkgname}/"
     allowed_extra = {doc + "copyright", doc + "changelog.Debian.gz", doc + "README.Debian"}
@@ -149,7 +193,11 @@ def verify(upstream, deb):
         if got[3] or got[4]:
             problems.append(f"not owned by root in .deb: {target}")
         if kind == "file":
-            if got[0] != "file" or got[1] != keywords.get("sha256digest"):
+            ours = replaced.pop(target, None)
+            if ours is not None:
+                replaced_count += 1
+            want = ours if ours is not None else keywords.get("sha256digest")
+            if got[0] != "file" or got[1] != want:
                 problems.append(f"content differs: {target}")
             elif "mode" in keywords and got[2] != int(keywords["mode"], 8):
                 problems.append(f"mode {got[2]:o} instead of {keywords['mode']}: {target}")
@@ -158,19 +206,27 @@ def verify(upstream, deb):
             if got[0] != "link" or got[1] != unvis(keywords.get("link", "")):
                 problems.append(f"link differs: {target}")
             checked += 1
+    for name in sorted(replaced):
+        problems.append(f"replacement for a file upstream does not ship: {name}")
     for name, got in members.items():
         if got[0] in ("file", "link") and name not in expected and name not in allowed_extra:
             problems.append(f"unexpected in .deb: {name}")
     if problems:
         sys.exit(f"{deb}: {len(problems)} problems\n  " + "\n  ".join(problems[:50]))
-    print(f"verify ok: {deb}: {checked} files and links identical to {pkgname} upstream")
+    if replaced_count:
+        print(f"verify ok: {deb}: {checked - replaced_count} files and links identical to "
+              f"{pkgname} upstream, {replaced_count} replaced by the files in {replaced_root}")
+    else:
+        print(f"verify ok: {deb}: {checked} files and links identical to {pkgname} upstream")
 
 
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "guard":
         guard(sys.argv[2])
-    elif len(sys.argv) == 4 and sys.argv[1] == "verify":
-        verify(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 3 and sys.argv[1] == "elves":
+        elves(sys.argv[2])
+    elif len(sys.argv) in (4, 5) and sys.argv[1] == "verify":
+        verify(*sys.argv[2:])
     else:
         sys.exit(__doc__)
 

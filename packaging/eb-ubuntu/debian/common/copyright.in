@@ -1,16 +1,28 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: Droidloom
 Upstream-Contact: https://github.com/denialwm/droidloom
-Source: https://github.com/denialwm/droidloom/releases/download/packages/droidloom-source-@PKGVER@-@PKGREL@.tar.gz
-Comment: The binaries in this package are the unchanged contents of the
- upstream Arch Linux ARM package @PACKAGE@ @PKGVER@-@PKGREL@, built from
- commit @COMMIT@. The complete license texts and notices shipped by upstream
+@REPACK@Source: https://github.com/denialwm/droidloom/releases/download/packages/droidloom-source-@PKGVER@-@PKGREL@.tar.gz
+@REPACK@Comment: The binaries in this package are the unchanged contents of the
+@REPACK@ upstream Arch Linux ARM package @PACKAGE@ @PKGVER@-@PKGREL@, built from
+@REPACK@ commit @COMMIT@. The complete license texts and notices shipped by upstream
+@REBUILT@Source: https://github.com/EvilBorsch/droidloom/tree/@HOST_COMMIT@
+@REBUILT@ https://github.com/denialwm/droidloom/releases/download/packages/droidloom-source-@PKGVER@-@PKGREL@.tar.gz
+@REBUILT@Comment: The programs /usr/bin/droidloom* and
+@REBUILT@ /usr/lib/droidloom/droidloom-package-helper are built from
+@REBUILT@ https://github.com/EvilBorsch/droidloom commit
+@REBUILT@ @HOST_COMMIT@, upstream's commit
+@REBUILT@ @COMMIT@ with fixes for Debian and Ubuntu.
+@REBUILT@ All other files are the unchanged contents of the upstream Arch
+@REBUILT@ Linux ARM package @PACKAGE@ @PKGVER@-@PKGREL@. The complete license
+@REBUILT@ texts and notices shipped by upstream
  are in /usr/share/doc/@PACKAGE@/licenses/ (upstream path
  /usr/share/licenses/@PACKAGE@/): LICENSE, LICENSES/, THIRD_PARTY.md and,
  where present, the Cargo crate notices (rust/), the Android notice catalog
  (Android-NOTICE.xml.gz) and the Mesa licenses (mesa/, Mesa-license.rst).
  .
- Corresponding source: Droidloom's own code is in the source tarball above.
+@REPACK@ Corresponding source: Droidloom's own code is in the source tarball above.
+@REBUILT@ Corresponding source: the fork's commit above; upstream's tarball for
+@REBUILT@ the release it is based on.
  Android components are built from AOSP tag android-17.0.0_r1 (manifest
  commit 5bc9a7ce1cd78dd53613bbfd0ebf506e1e4adb0f) with Droidloom's patches;
  the base partitions are Android CI build 15885347 (CP2A.260605.016,
