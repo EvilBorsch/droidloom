@@ -20,13 +20,16 @@ which is upstream's release @PKGVER@-@PKGREL@, commit
 
 @HOST_CHANGES@
 
-Two of them change what a person sees. An application launched while
+Three of them change what a person sees. An application launched while
 Droidloom is stopped (a launcher icon, or droidloomctl launch) starts
 Droidloom as droidloomctl start does, waits for Android and then opens; this
 does not enable droidloom.service for the next session. The launcher entries
 of Android's own applications (packages com.android.*) are named with
 "(Android)" after Android's label, "Settings (Android)", so they are not
-taken for the host's Settings and Files.
+taken for the host's Settings and Files. Android counts as ready only once
+its user 0 is unlocked: Android reports its boot completed a moment before
+that, and an application that is not direct-boot aware, such as Files
+(Android), launched in that moment failed with "Activity start failed: -92".
 
 One file is this packaging's own, not upstream's:
 /usr/lib/udev/rules.d/60-droidloom-loop.rules. Android's system images and
