@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Makes a minimal Ubuntu arm64 root for cross-building Droidloom's host
+# programs: the -dev packages they build against, extracted with their
+# dependencies and without running any maintainer script, so no emulator is
+# needed. Run as root. (EvilBorsch fork; see docs/EB-BUILD.md.)
+set -euo pipefail
+
+MIRROR="${EB_UBUNTU_PORTS:-http://ports.ubuntu.com/ubuntu-ports}"
+
+usage() {
+    printf 'Usage: %s ROOT [SUITE]\n' "$0" >&2
+    printf 'Makes ROOT from %s; SUITE defaults to resolute (Ubuntu 26.04).\n' "$MIRROR" >&2
+    exit 2
+}
+
+# Called by mmdebstrap's extract hook while the downloaded packages are still
+# in the root's apt cache: records the exact packages and which package owns
+# each file, so the build can name the Ubuntu package behind every library a
+# program links.
+if [[ "${1:-}" == --record ]]; then
+    root="$2"
+    archives="$root/var/cache/apt/archives"
+    find "$archives" -maxdepth 1 -name '*.deb' -printf '%f\n' | sort > "$root/EB-SYSROOT-PACKAGES.txt"
+    for deb in "$archives"/*.deb; do
+        package="$(dpkg-deb --field "$deb" Package)"
+        dpkg-deb --fsys-tarfile "$deb" | tar -t | sed -n "s|^\./\(.*[^/]\)$|$package /\1|p"
+    done | sort > "$root/EB-SYSROOT-FILES.txt"
+    exit 0
+fi
+
+[[ $# -ge 1 && $# -le 2 ]] || usage
+ROOT="$1"
+SUITE="${2:-resolute}"
+SELF="$(realpath -- "${BASH_SOURCE[0]}")"
+
+# What the host programs link or compile against: libgbm, libxkbcommon and
+# libwayland-server (droidloom-wayland, -devices, -gpu-server), libpipewire
+# (droidloom-audio's C adapter). libpam and libvulkan are loaded with dlopen
+# at run time; their packages are here so the root also runs the programs
+# under qemu-aarch64 -L.
+PACKAGES=(
+    libc6-dev libgcc-s1
+    libdrm-dev libgbm-dev libxkbcommon-dev libwayland-dev
+    libpipewire-0.3-dev libpam0g-dev libvulkan-dev
+)
+
+[[ "$(id -u)" == 0 ]] || { printf '%s must run as root\n' "$0" >&2; exit 1; }
+command -v mmdebstrap >/dev/null || { printf 'mmdebstrap is required\n' >&2; exit 1; }
+[[ ! -e "$ROOT" ]] || { printf '%s exists; remove it first\n' "$ROOT" >&2; exit 1; }
+
+include="$(IFS=,; printf '%s' "${PACKAGES[*]}")"
+mmdebstrap --variant=extract --arch=arm64 --include="$include" \
+    --extract-hook="'$SELF' --record \"\$1\"" \
+    "$SUITE" "$ROOT" \
+    "deb $MIRROR $SUITE main universe" \
+    "deb $MIRROR $SUITE-updates main universe" \
+    "deb $MIRROR $SUITE-security main universe"
+
+# Ubuntu's merged /usr: libc's linker script and the ELF interpreter name /lib.
+for directory in bin lib sbin; do
+    [[ -e "$ROOT/$directory" ]] || ln -s "usr/$directory" "$ROOT/$directory"
+done
+
+# Owned like the directory it is in, so the builder can use it unprivileged.
+chown -R --no-dereference --reference="$(dirname -- "$ROOT")" "$ROOT"
+printf 'made %s with %s packages\n' "$ROOT" "$(wc -l < "$ROOT/EB-SYSROOT-PACKAGES.txt")"

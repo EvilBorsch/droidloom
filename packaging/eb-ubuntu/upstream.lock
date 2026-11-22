@@ -1,0 +1,17 @@
+# Droidloom upstream pinned for the erhai distribution (read by tools/eb-build-debs and tools/eb-build-runtime).
+# Release "packages" of github.com/denialwm/droidloom, pkgrel 49, published 2026-11-20.
+# The SHA-256 values are the digests GitHub reports for the release assets
+# (gh release view packages -R denialwm/droidloom --json assets); the files
+# downloaded on 2026-11-22 matched them.
+DROIDLOOM_PKGVER=0.1.0
+DROIDLOOM_PKGREL=49
+# Source commit "Package release 49" (the release's droidloom-source-0.1.0-49.tar.gz).
+DROIDLOOM_COMMIT=572e1c51c5caf75183efe25ad811f98c1268bf56
+DROIDLOOM_URL=https://github.com/denialwm/droidloom/releases/download/packages
+# The image names the base it needs (.PKGINFO: depend = droidloom-base=0.1.0-49).
+DROIDLOOM_BASE_PKGVER=0.1.0
+DROIDLOOM_BASE_PKGREL=49
+SHA256_RUNTIME=6e5cf18c7c196f3ffa5a79ca938e0caf8315548610f21bb6db4adae0e35dbc28
+SHA256_IMAGE=8257effad113503ec5d0ed369e0b2d6d61cd976f37f93ce5b9a206f883a96062
+SHA256_BASE=40712a6eb1bcc451c8c4bdd2ca5b2951f845d041c4746a4bb2a07b3259b49473
+SHA256_SOURCE=47f368ce837f7411c984949f74d7b94064d5b0bf226cfa5aebb13c1e97d05704

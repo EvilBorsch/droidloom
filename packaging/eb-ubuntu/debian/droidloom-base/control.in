@@ -1,0 +1,16 @@
+Package: droidloom-base
+Version: @DEB_VERSION@
+Architecture: arm64
+Maintainer: EvilBorsch <44337169+EvilBorsch@users.noreply.github.com>
+Installed-Size: @INSTALLED_SIZE@
+Section: misc
+Priority: optional
+Homepage: https://github.com/denialwm/droidloom
+Description: Android system partitions for Droidloom (AOSP 17 base)
+ Read-only EROFS images of the AOSP Android 17 system, system_ext and product
+ partitions (Android CI build CP2A.260605.016, aosp_cf_arm64_only_phone,
+ 64-bit only), mounted by Droidloom inside its Android cell. They change
+ rarely, so this large package is downloaded again only when they do.
+ .
+ Repacked unchanged from the upstream Arch Linux ARM package
+ droidloom-base @PKGVER@-@PKGREL@.

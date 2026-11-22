@@ -1,0 +1,13 @@
+#!/bin/sh
+# droidloom-image and droidloom-base: stop Droidloom before their Android
+# images are replaced, as upstream's 60-droidloom-upgrade.hook does for all
+# three packages. The helper belongs to droidloom-runtime; without it nothing
+# can be running.
+set -e
+helper=/usr/lib/droidloom/droidloom-package-helper
+case "$1" in
+upgrade)
+	[ ! -x "$helper" ] || "$helper" before-upgrade
+	;;
+esac
+exit 0

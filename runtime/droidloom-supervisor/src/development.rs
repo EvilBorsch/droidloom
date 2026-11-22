@@ -380,7 +380,21 @@ impl DevelopmentCell {
             .map_err(|source| io_error("poll Android namespace process before stopping", source))?
             .is_none()
         {
-            signal_process(self.child.id(), libc::SIGTERM)?;
+            // Ask Android to power itself off, as its own power menu does:
+            // init stops its services, syncs, and its reboot call ends the
+            // PID namespace, so `unshare --fork` exits and the wait below
+            // sees a clean shutdown (about a third of a second on a tablet).
+            // SIGTERM does not do that: Android's init has CAP_SYS_BOOT here
+            // and so installs no SIGTERM handler, and the kernel drops a
+            // signal a namespace's init does not handle. Passing the owner's
+            // SIGTERM on with `unshare --forward-signals`, which also needs
+            // util-linux 2.42, only ran into the deadline below. Before
+            // Android's init runs there is nothing to ask: end the owner,
+            // whose --kill-child=TERM ends its child.
+            let asked = namespace_init(self.child.id()).is_some_and(request_android_power_off);
+            if !asked {
+                signal_process(self.child.id(), libc::SIGTERM)?;
+            }
             let deadline = Instant::now() + Duration::from_secs(10);
             while Instant::now() < deadline {
                 if self
@@ -490,7 +504,6 @@ pub fn start_development_cell(
             OsStr::new("--uts"),
             OsStr::new("--fork"),
             OsStr::new("--kill-child=TERM"),
-            OsStr::new("--forward-signals"),
             OsStr::new("--propagation=private"),
             entry_executable.as_os_str(),
             OsStr::new("development-enter"),
@@ -557,6 +570,41 @@ pub fn recover_development_cell(spec: &CellSpec) -> Result<(), DevelopmentError>
     spec.validate()?;
     DevelopmentNetwork::recover(spec)?;
     cleanup_runtime_directory(spec)
+}
+
+/// The parent PID of a process, from `/proc/PID/stat`.
+fn parent_pid(pid: u32) -> Option<u32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name may hold spaces and parentheses: the fields after it
+    // follow the last ") ", state first.
+    let (_, rest) = stat.rsplit_once(") ")?;
+    rest.split_ascii_whitespace().nth(1)?.parse().ok()
+}
+
+/// The namespace's PID 1: the one child `unshare --fork` started.
+fn namespace_init(owner: u32) -> Option<u32> {
+    fs::read_dir("/proc")
+        .ok()?
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .find(|&pid| parent_pid(pid) == Some(owner))
+}
+
+/// Asks Android's init, host PID `init`, to shut Android down and power off;
+/// false when the request could not be made.
+fn request_android_power_off(init: u32) -> bool {
+    droidloom_cpu_placement::command("/usr/bin/timeout")
+        .args(["--kill-after=1s", "5s", "/usr/bin/nsenter", "--target"])
+        .arg(init.to_string())
+        .args([
+            "--mount", "--uts", "--ipc", "--net", "--pid", "--cgroup", "--root", "--wd", "--",
+            "/system/bin/setprop", "sys.powerctl", "shutdown",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn signal_process(pid: u32, signal: libc::c_int) -> Result<(), DevelopmentError> {

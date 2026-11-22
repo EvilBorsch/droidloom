@@ -49,7 +49,38 @@ pub(crate) struct Lease {
     pub(crate) server: Ipv4Addr,
     pub(crate) client: Ipv4Addr,
     pub(crate) prefix_len: u8,
-    pub(crate) dns: [Ipv4Addr; 2],
+    pub(crate) dns: Resolvers,
+}
+
+/// The resolvers of a lease, in the order the cell tries them: at least one,
+/// at most [`Resolvers::MAX`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Resolvers {
+    servers: [Ipv4Addr; Resolvers::MAX],
+    len: usize,
+}
+
+impl Resolvers {
+    pub(crate) const MAX: usize = 4;
+
+    /// `first`, then those of `rest` not listed yet, up to [`Self::MAX`].
+    pub(crate) fn new(first: Ipv4Addr, rest: impl IntoIterator<Item = Ipv4Addr>) -> Self {
+        let mut resolvers = Self {
+            servers: [first; Self::MAX],
+            len: 1,
+        };
+        for server in rest {
+            if resolvers.len < Self::MAX && !resolvers.as_slice().contains(&server) {
+                resolvers.servers[resolvers.len] = server;
+                resolvers.len += 1;
+            }
+        }
+        resolvers
+    }
+
+    pub(crate) fn as_slice(&self) -> &[Ipv4Addr] {
+        &self.servers[..self.len]
+    }
 }
 
 /// Answers DHCP on one host interface until dropped.
@@ -311,8 +342,10 @@ fn reply(request: &[u8], lease: Lease) -> Option<Reply> {
         payload.extend_from_slice(&mask.to_be_bytes());
         payload.extend_from_slice(&[OPTION_ROUTER, 4]);
         payload.extend_from_slice(&lease.server.octets());
-        payload.extend_from_slice(&[OPTION_DNS, 8]);
-        for server in lease.dns {
+        let resolvers = lease.dns.as_slice();
+        // At most Resolvers::MAX addresses of four bytes: fits the length byte.
+        payload.extend_from_slice(&[OPTION_DNS, (resolvers.len() * 4) as u8]);
+        for server in resolvers {
             payload.extend_from_slice(&server.octets());
         }
     }
@@ -427,12 +460,14 @@ fn checksum(parts: &[&[u8]]) -> u16 {
 mod tests {
     use super::*;
 
-    const LEASE: Lease = Lease {
-        server: Ipv4Addr::new(10, 177, 0, 1),
-        client: Ipv4Addr::new(10, 177, 0, 2),
-        prefix_len: 30,
-        dns: [Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
-    };
+    fn lease() -> Lease {
+        Lease {
+            server: Ipv4Addr::new(10, 177, 0, 1),
+            client: Ipv4Addr::new(10, 177, 0, 2),
+            prefix_len: 30,
+            dns: Resolvers::new(Ipv4Addr::new(1, 1, 1, 1), [Ipv4Addr::new(8, 8, 8, 8)]),
+        }
+    }
     const MAC: [u8; 6] = [0x02, 0x64, 0x6c, 0, 0, 2];
 
     fn request(message_type: u8, extra: &[u8]) -> Vec<u8> {
@@ -472,7 +507,7 @@ mod tests {
 
     #[test]
     fn discover_gets_the_cell_lease() {
-        let offer = reply(&request(DISCOVER, &[]), LEASE).expect("offer");
+        let offer = reply(&request(DISCOVER, &[]), lease()).expect("offer");
         assert_eq!(option(&offer, OPTION_MESSAGE_TYPE), Some(vec![OFFER]));
         assert_eq!(offer.payload[4..8], [1, 2, 3, 4]);
         assert_eq!(offer.payload[16..20], [10, 177, 0, 2]);
@@ -488,7 +523,7 @@ mod tests {
         );
         assert_eq!(option(&offer, OPTION_SERVER_ID), Some(vec![10, 177, 0, 1]));
         assert!(offer.payload.len() >= BOOTP_MIN_LEN);
-        assert_eq!((offer.destination, offer.mac), (LEASE.client, MAC));
+        assert_eq!((offer.destination, offer.mac), (lease().client, MAC));
     }
 
     #[test]
@@ -507,7 +542,7 @@ mod tests {
             0,
             1,
         ];
-        let ack = reply(&request(REQUEST, &wanted), LEASE).expect("ack");
+        let ack = reply(&request(REQUEST, &wanted), lease()).expect("ack");
         assert_eq!(option(&ack, OPTION_MESSAGE_TYPE), Some(vec![ACK]));
         assert_eq!(
             option(&ack, OPTION_LEASE_TIME),
@@ -515,29 +550,29 @@ mod tests {
         );
 
         let other = [OPTION_REQUESTED_ADDRESS, 4, 192, 168, 1, 50];
-        let nak = reply(&request(REQUEST, &other), LEASE).expect("nak");
+        let nak = reply(&request(REQUEST, &other), lease()).expect("nak");
         assert_eq!(option(&nak, OPTION_MESSAGE_TYPE), Some(vec![NAK]));
         assert_eq!(nak.payload[16..20], [0, 0, 0, 0]);
         assert_eq!((nak.destination, nak.mac), (Ipv4Addr::BROADCAST, [0xff; 6]));
 
         let elsewhere = [OPTION_SERVER_ID, 4, 192, 168, 1, 1];
-        assert_eq!(reply(&request(REQUEST, &elsewhere), LEASE), None);
+        assert_eq!(reply(&request(REQUEST, &elsewhere), lease()), None);
     }
 
     #[test]
     fn renewal_from_a_bound_client_is_unicast() {
         let mut renew = request(REQUEST, &[]);
         renew[12..16].copy_from_slice(&[10, 177, 0, 2]);
-        let ack = reply(&renew, LEASE).expect("ack");
+        let ack = reply(&renew, lease()).expect("ack");
         assert_eq!(option(&ack, OPTION_MESSAGE_TYPE), Some(vec![ACK]));
-        assert_eq!((ack.destination, ack.mac), (LEASE.client, MAC));
+        assert_eq!((ack.destination, ack.mac), (lease().client, MAC));
     }
 
     #[test]
     fn broadcast_flag_is_honoured() {
         let mut discover = request(DISCOVER, &[]);
         discover[10] = 0x80;
-        let offer = reply(&discover, LEASE).expect("offer");
+        let offer = reply(&discover, lease()).expect("offer");
         assert_eq!(
             (offer.destination, offer.mac),
             (Ipv4Addr::BROADCAST, [0xff; 6])
@@ -548,7 +583,7 @@ mod tests {
     #[test]
     fn replies_round_trip_through_the_ip_and_udp_headers() {
         let payload = request(DISCOVER, &[]);
-        let packet = udp_packet(LEASE.client, LEASE.server, &payload);
+        let packet = udp_packet(lease().client, lease().server, &payload);
         assert_eq!(checksum(&[&packet[..20]]), 0);
         // A reply addressed back to the server port parses as a request again.
         let mut to_server = packet.clone();
@@ -559,13 +594,13 @@ mod tests {
 
     #[test]
     fn malformed_messages_are_ignored() {
-        assert_eq!(reply(&[], LEASE), None);
+        assert_eq!(reply(&[], lease()), None);
         let mut wrong_cookie = request(DISCOVER, &[]);
         wrong_cookie[BOOTP_FIXED_LEN] = 0;
-        assert_eq!(reply(&wrong_cookie, LEASE), None);
+        assert_eq!(reply(&wrong_cookie, lease()), None);
         let mut truncated = request(DISCOVER, &[]);
         truncated.truncate(BOOTP_FIXED_LEN + 6);
-        assert_eq!(reply(&truncated, LEASE), None);
-        assert_eq!(reply(&request(7, &[]), LEASE), None);
+        assert_eq!(reply(&truncated, lease()), None);
+        assert_eq!(reply(&request(7, &[]), lease()), None);
     }
 }

@@ -1,0 +1,12 @@
+#!/bin/sh
+# droidloom-image and droidloom-base: make sure Android is stopped before its
+# images disappear. droidloom-runtime depends on both, so it is normally
+# removed (and stops Droidloom) first; this covers dpkg --force-depends.
+set -e
+helper=/usr/lib/droidloom/droidloom-package-helper
+case "$1" in
+remove|upgrade|deconfigure)
+	[ ! -x "$helper" ] || "$helper" before-upgrade
+	;;
+esac
+exit 0

@@ -1,0 +1,233 @@
+#!/bin/bash
+# Builds Droidloom's .deb packages for the arm64 erhai Ubuntu distribution from the
+# pinned upstream Arch Linux ARM packages (packaging/eb-ubuntu/upstream.lock).
+# droidloom-image and droidloom-base are repacked with their files unchanged;
+# droidloom-runtime gets upstream's files with its programs replaced by the ones
+# tools/eb-build-runtime built from this fork. pacman's metadata and hooks are
+# replaced by Debian control files and maintainer scripts. Each .deb is then
+# checked file by file against upstream's .MTREE. (EvilBorsch fork; see
+# docs/EB-BUILD.md.)
+#
+#   eb-build-debs [--host DIR] EB [PACKAGE...]
+#     EB       our packaging revision: eb2 -> 0.1.0-49+eb2
+#     PACKAGE  droidloom-runtime, droidloom-image, droidloom-base (default: all)
+#     --host   output directory of tools/eb-build-runtime; needed for the runtime
+#
+# Runs as an ordinary user (dpkg-deb --root-owner-group; no sudo).
+# Environment: PKGS  upstream .pkg.tar.zst files (downloaded there when missing)
+#              OUT   where the .debs and their .sha256 go
+#              WORK  staging on ext4 (symlinks and modes), emptied after each package
+#              THREADS  zstd threads (default 4: other builds may be running)
+#              PKGS, OUT and WORK default to ~/work-droidloom-debs/{pkgs,out,stage}.
+set -euo pipefail
+export LC_ALL=C
+
+here=$(cd "$(dirname "$0")/../packaging/eb-ubuntu" && pwd)
+. "$here/upstream.lock"
+die() { echo "$*" >&2; exit 1; }
+HOST=
+if [ "${1:-}" = --host ]; then
+	[ $# -ge 2 ] || die "--host needs a directory"
+	HOST=$(realpath -- "$2")
+	shift 2
+fi
+[ $# -ge 1 ] || die "usage: $0 [--host DIR] EB [PACKAGE...]"
+EB=$1
+shift
+PACKAGES=("$@")
+[ ${#PACKAGES[@]} -gt 0 ] || PACKAGES=(droidloom-runtime droidloom-image droidloom-base)
+PKGS=${PKGS:-$HOME/work-droidloom-debs/pkgs}
+OUT=${OUT:-$HOME/work-droidloom-debs/out}
+WORK=${WORK:-$HOME/work-droidloom-debs/stage}
+THREADS=${THREADS:-4}
+check="python3 -I $here/check-archive.py"
+
+case "$EB" in eb[0-9]*) ;; *) echo "packaging revision must look like eb1" >&2; exit 2;; esac
+for pkg in "${PACKAGES[@]}"; do
+	case "$pkg" in droidloom-runtime|droidloom-image|droidloom-base) ;; *) die "unknown package $pkg";; esac
+done
+V=$DROIDLOOM_PKGVER R=$DROIDLOOM_PKGREL
+BV=$DROIDLOOM_BASE_PKGVER BR=$DROIDLOOM_BASE_PKGREL
+for tool in dpkg-deb dpkg zstd python3 sha256sum curl readelf; do
+	command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 1; }
+done
+
+# The runtime's programs: what tools/eb-build-runtime built, for this release.
+if printf '%s\n' "${PACKAGES[@]}" | grep -qx droidloom-runtime; then
+	[ -n "$HOST" ] || die "droidloom-runtime needs --host: the programs tools/eb-build-runtime built"
+	for f in root source-commit source-date source-changes needed.txt glibc-max BUILD-INFO.txt; do
+		[ -e "$HOST/$f" ] || die "$HOST is not an output of tools/eb-build-runtime (no $f)"
+	done
+	grep -qx "upstream: Droidloom $V-$R, commit $DROIDLOOM_COMMIT" "$HOST/BUILD-INFO.txt" \
+		|| die "$HOST was built for another upstream release than $V-$R"
+	HOST_COMMIT=$(cat "$HOST/source-commit")
+	[[ "$HOST_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "$HOST/source-commit is not a commit"
+fi
+mkdir -p "$PKGS" "$OUT" "$WORK"
+
+# Download when missing, then always check the pinned SHA-256.
+fetch() {
+	local name=$1 sum=$2 file="$PKGS/$1"
+	if [ ! -f "$file" ]; then
+		curl -fL --retry 3 -o "$file.part" "$DROIDLOOM_URL/$name"
+		mv "$file.part" "$file"
+	fi
+	echo "$sum  $file" | sha256sum -c --quiet - || { echo "$name: SHA-256 differs from upstream.lock" >&2; exit 1; }
+}
+RUNTIME=droidloom-runtime-$V-$R-aarch64.pkg.tar.zst
+IMAGE=droidloom-image-$V-$R-aarch64.pkg.tar.zst
+BASE=droidloom-base-$BV-$BR-aarch64.pkg.tar.zst
+fetch "$RUNTIME" "$SHA256_RUNTIME"
+fetch "$IMAGE" "$SHA256_IMAGE"
+fetch "$BASE" "$SHA256_BASE"
+
+# .PKGINFO is the archive's first member; --occurrence stops tar there instead
+# of reading the whole (up to 900 MB) archive.
+pkginfo() { tar --zstd -xOf "$PKGS/$1" --occurrence=1 .PKGINFO | sed -n "s/^$2 = //p"; }
+# The upstream packages must be the ones upstream.lock names, and the image
+# must want this base.
+[ "$(pkginfo "$RUNTIME" pkgver)" = "$V-$R" ] || die "$RUNTIME is not $V-$R"
+[ "$(pkginfo "$RUNTIME" arch)" = aarch64 ] || die "$RUNTIME is not aarch64"
+[ "$(pkginfo "$IMAGE" pkgver)" = "$V-$R" ] || die "$IMAGE is not $V-$R"
+[ "$(pkginfo "$BASE" pkgver)" = "$BV-$BR" ] || die "$BASE is not $BV-$BR"
+[ "$(pkginfo "$IMAGE" depend)" = "droidloom-base=$BV-$BR" ] || die "the image wants another base: $(pkginfo "$IMAGE" depend)"
+pkginfo "$RUNTIME" depend | grep -qx "droidloom-image=$V-$R" || die "the runtime wants another image"
+
+# Newest GLIBC symbol version the ELF files given as arguments need.
+glibc_max() {
+	readelf -VW "$@" | grep -o 'Name: GLIBC_[0-9.]*' | sed 's/.*GLIBC_//' | sort -V | tail -1
+}
+
+# Puts the programs from $HOST into the staged runtime $1 (upstream's files),
+# after checking that they are exactly upstream's ELF files, and sets LIBC to
+# the glibc the package must depend on.
+replace_programs() {
+	local st=$1 upstream=$2 ours theirs path upstream_glibc
+	theirs=$($check elves "$upstream")
+	ours=$(cd "$HOST/root" && find . -type f -printf '%P\n' | sort)
+	[ -n "$theirs" ] && [ "$theirs" = "$ours" ] || die "upstream's ELF files and the programs in $HOST/root differ:
+$(diff <(echo "$theirs") <(echo "$ours") || :)"
+	# Never below what upstream's programs need; raised if ours need more.
+	upstream_glibc=$(cd "$st" && glibc_max $theirs)
+	LIBC=$upstream_glibc
+	if dpkg --compare-versions "$(cat "$HOST/glibc-max")" gt "$LIBC"; then LIBC=$(cat "$HOST/glibc-max"); fi
+	while read -r path; do
+		install -m "$(stat -c %a "$st/$path")" "$HOST/root/$path" "$st/$path"
+	done <<< "$ours"
+	# What the rebuild is for: Ubuntu's runuser is /usr/sbin/runuser, and
+	# util-linux 2.41 rejects unshare --forward-signals.
+	grep -aqF /usr/sbin/runuser "$st/usr/lib/droidloom/droidloom-package-helper" \
+		|| die "the package helper does not look for /usr/sbin/runuser"
+	while read -r path; do
+		! grep -aqF -- --forward-signals "$st/$path" || die "$path passes unshare --forward-signals"
+	done <<< "$ours"
+}
+
+# build PACKAGE UPSTREAM_FILE DEB_VERSION
+build() {
+	local pkg=$1 upstream="$PKGS/$2" version=$3 st="$WORK/$1" deb origin epoch
+	deb="$OUT/${pkg}_${version}_arm64.deb"
+	$check guard "$upstream"
+	rm -rf "$st"; mkdir -p "$st"
+	tar --zstd -xf "$upstream" -C "$st" --preserve-permissions --no-same-owner
+	# pacman's own files: metadata and transaction hooks (replaced by DEBIAN/*).
+	rm -f "$st/.PKGINFO" "$st/.BUILDINFO" "$st/.MTREE" "$st/.INSTALL"
+	rm -rf "$st/usr/share/libalpm"
+	epoch=$(pkginfo "$2" builddate)
+	LIBC=
+	if [ "$pkg" = droidloom-runtime ]; then
+		replace_programs "$st" "$upstream"
+		origin=REBUILT
+		# File times are clamped to the later of upstream's build and our commit.
+		[ "$(cat "$HOST/source-date")" -le "$epoch" ] || epoch=$(cat "$HOST/source-date")
+	else
+		origin=REPACK
+	fi
+	# Debian keeps license texts with the package's documentation.
+	mkdir -p "$st/usr/share/doc/$pkg"
+	if [ -d "$st/usr/share/licenses/$pkg" ]; then
+		mv "$st/usr/share/licenses/$pkg" "$st/usr/share/doc/$pkg/licenses"
+		rmdir "$st/usr/share/licenses"
+	fi
+	# copyright.in has lines for repacked (@REPACK@) and rebuilt (@REBUILT@) packages.
+	sed -e "/^@$( [ $origin = REPACK ] && echo REBUILT || echo REPACK )@/d" -e "s/^@$origin@//" \
+		-e "s|@PACKAGE@|$pkg|g" -e "s|@PKGVER@|$V|g" -e "s|@PKGREL@|$R|g" \
+		-e "s|@COMMIT@|$DROIDLOOM_COMMIT|g" -e "s|@HOST_COMMIT@|${HOST_COMMIT:-}|g" \
+		"$here/debian/common/copyright.in" > "$st/usr/share/doc/$pkg/copyright"
+	if [ $origin = REBUILT ]; then
+		{
+			printf '%s (%s) resolute; urgency=medium\n\n' "$pkg" "$version"
+			printf '  * Upstream %s %s with its programs built for\n' "$pkg" "$(pkginfo "$2" pkgver)"
+			printf '    Ubuntu 26.04 arm64 from https://github.com/EvilBorsch/droidloom\n'
+			printf '    commit %s,\n' "$HOST_COMMIT"
+			printf '    upstream commit %s with:\n' "$DROIDLOOM_COMMIT"
+			tac "$HOST/source-changes" | sed 's/^/    - /'
+			printf '  * All other files repacked unchanged.\n\n'
+			printf ' -- EvilBorsch <44337169+EvilBorsch@users.noreply.github.com>  %s\n' \
+				"$(date -R -u -d "@$(cat "$HOST/source-date")")"
+		} | gzip -9n > "$st/usr/share/doc/$pkg/changelog.Debian.gz"
+	else
+		printf '%s (%s) resolute; urgency=medium\n\n  * Repack of upstream %s %s, files unchanged.\n\n -- EvilBorsch <44337169+EvilBorsch@users.noreply.github.com>  %s\n' \
+			"$pkg" "$version" "$pkg" "$(pkginfo "$2" pkgver)" \
+			"$(date -R -u -d "@$(pkginfo "$2" builddate)")" | gzip -9n > "$st/usr/share/doc/$pkg/changelog.Debian.gz"
+	fi
+	if [ -f "$here/debian/$pkg/README.Debian" ]; then
+		if [ $origin = REBUILT ]; then tac "$HOST/source-changes" | sed 's/^/    /'; fi > "$WORK/changes.txt"
+		sed -e "s|@PKGVER@|$V|g" -e "s|@PKGREL@|$R|g" -e "s|@COMMIT@|$DROIDLOOM_COMMIT|g" \
+			-e "s|@HOST_COMMIT@|${HOST_COMMIT:-}|g" \
+			-e "/^@HOST_CHANGES@\$/{r $WORK/changes.txt" -e 'd}' \
+			"$here/debian/$pkg/README.Debian" > "$st/usr/share/doc/$pkg/README.Debian"
+		chmod 0644 "$st/usr/share/doc/$pkg/README.Debian"
+		rm -f "$WORK/changes.txt"
+	fi
+	chmod -R u+w,go-w "$st/usr/share/doc/$pkg"
+
+	mkdir -p "$st/DEBIAN"
+	local size
+	size=$(find "$st" -path "$st/DEBIAN" -prune -o \( -type f -o -type l \) -printf '%s\n' \
+		| awk '{s += int(($1 + 1023) / 1024)} END {print s + 0}')
+	sed -e "s|@DEB_VERSION@|$version|g" -e "s|@INSTALLED_SIZE@|$size|g" \
+		-e "s|@PKGVER@|$V|g" -e "s|@PKGREL@|$R|g" -e "s|@NEXT_PKGREL@|$((R + 1))|g" \
+		-e "s|@BASE_PKGVER@|$BV|g" -e "s|@BASE_PKGREL@|$BR|g" -e "s|@BASE_NEXT_PKGREL@|$((BR + 1))|g" \
+		-e "s|@COMMIT@|$DROIDLOOM_COMMIT|g" -e "s|@HOST_COMMIT@|${HOST_COMMIT:-}|g" -e "s|@LIBC_VERSION@|$LIBC|g" \
+		"$here/debian/$pkg/control.in" > "$st/DEBIAN/control"
+	! grep -q '@[A-Z_]*@' "$st/DEBIAN/control" || die "$pkg: unfilled placeholder in control"
+	if [ "$pkg" = droidloom-runtime ]; then
+		# Every library a program links must come from a package Depends names.
+		local depends path soname owner
+		depends=$(sed -n 's/^Depends: //p' "$st/DEBIAN/control" | tr ',' '\n' | sed 's/^ *//; s/[ (].*//')
+		while read -r path soname owner; do
+			grep -qx "$owner" <<< "$depends" || die "$path needs $soname from $owner, which Depends does not name"
+		done < "$HOST/needed.txt"
+		install -m 0755 "$here/debian/$pkg/prerm" "$here/debian/$pkg/postinst" "$here/debian/$pkg/postrm" "$st/DEBIAN/"
+		install -m 0644 "$here/debian/$pkg/triggers" "$st/DEBIAN/triggers"
+	else
+		install -m 0755 "$here/debian/common/preinst-stop" "$st/DEBIAN/preinst"
+		install -m 0755 "$here/debian/common/prerm-stop" "$st/DEBIAN/prerm"
+	fi
+	(cd "$st" && find . -path ./DEBIAN -prune -o -type f -printf '%P\0' | sort -z | xargs -0r md5sum) > "$st/DEBIAN/md5sums"
+	chmod 0644 "$st/DEBIAN/md5sums" "$st/DEBIAN/control"
+
+	# Clamp file times, so a rebuild gives the same archive.
+	SOURCE_DATE_EPOCH=$epoch \
+		dpkg-deb --root-owner-group -Zzstd -z19 --threads-max="$THREADS" --build "$st" "$deb"
+	rm -rf "$st"
+	if [ $origin = REBUILT ]; then
+		$check verify "$upstream" "$deb" "$HOST/root"
+	else
+		$check verify "$upstream" "$deb"
+	fi
+	(cd "$OUT" && sha256sum "$(basename "$deb")" > "$(basename "$deb").sha256")
+	dpkg-deb --field "$deb" Package Version Installed-Size Depends
+	BUILT+=("$(basename "$deb")")
+}
+
+BUILT=()
+for pkg in "${PACKAGES[@]}"; do
+	case "$pkg" in
+	droidloom-runtime) build droidloom-runtime "$RUNTIME" "$V-$R+$EB" ;;
+	droidloom-image) build droidloom-image "$IMAGE" "$V-$R+$EB" ;;
+	droidloom-base) build droidloom-base "$BASE" "$BV-$BR+$EB" ;;
+	esac
+done
+(cd "$OUT" && sha256sum "${BUILT[@]}" > "droidloom-$V-$R+$EB.SHA256SUMS" && cat "droidloom-$V-$R+$EB.SHA256SUMS")
