@@ -88,8 +88,10 @@ This sudo command performs the same privileged setup described above. First boot
 can take longer while Android initializes its data. `start` and `restart` wait
 for Android readiness before printing `Droidloom is running; Android is ready`.
 They show the observed boot stage: Android init, boot completion (including
-runtime and boot-animation service states when available), and Droidloom's input
-and task services. These are readiness observations, not a percentage estimate.
+runtime and boot-animation service states when available), Droidloom's input
+and task services, and the unlock of Android's user 0, after which every
+application can open. These are readiness observations, not a percentage
+estimate.
 
 Boot readiness has a 120-second deadline. While a command waits, progress is
 repeated every 10 seconds with elapsed time and the remaining request budget.
