@@ -380,7 +380,16 @@ impl DevelopmentCell {
             .map_err(|source| io_error("poll Android namespace process before stopping", source))?
             .is_none()
         {
-            signal_process(self.child.id(), libc::SIGTERM)?;
+            // Android PID 1 shuts down on SIGTERM, and `unshare --fork`
+            // exits once it has, so the wait below covers Android's own
+            // shutdown. Signal it directly: `unshare --forward-signals`,
+            // which would pass the owner's SIGTERM on, needs util-linux
+            // 2.42, newer than Debian 13 and Ubuntu 26.04 ship. Before
+            // unshare has forked, the owner's own SIGTERM ends it and
+            // --kill-child=TERM passes the signal on.
+            if !signal_namespace_init(self.child.id(), libc::SIGTERM)? {
+                signal_process(self.child.id(), libc::SIGTERM)?;
+            }
             let deadline = Instant::now() + Duration::from_secs(10);
             while Instant::now() < deadline {
                 if self
@@ -490,7 +499,6 @@ pub fn start_development_cell(
             OsStr::new("--uts"),
             OsStr::new("--fork"),
             OsStr::new("--kill-child=TERM"),
-            OsStr::new("--forward-signals"),
             OsStr::new("--propagation=private"),
             entry_executable.as_os_str(),
             OsStr::new("development-enter"),
@@ -557,6 +565,74 @@ pub fn recover_development_cell(spec: &CellSpec) -> Result<(), DevelopmentError>
     spec.validate()?;
     DevelopmentNetwork::recover(spec)?;
     cleanup_runtime_directory(spec)
+}
+
+/// The parent PID of a process, from `/proc/PID/stat`.
+fn parent_pid(pid: u32) -> Option<u32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name may hold spaces and parentheses: the fields after it
+    // follow the last ") ", state first.
+    let (_, rest) = stat.rsplit_once(") ")?;
+    rest.split_ascii_whitespace().nth(1)?.parse().ok()
+}
+
+/// The namespace's PID 1: the one child `unshare --fork` started.
+fn namespace_init(owner: u32) -> Option<u32> {
+    fs::read_dir("/proc")
+        .ok()?
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .find(|&pid| parent_pid(pid) == Some(owner))
+}
+
+/// Sends `signal` to the namespace's PID 1 through a pidfd, so a PID reused
+/// after the lookup is never signalled. False when the owner has no child.
+fn signal_namespace_init(owner: u32, signal: libc::c_int) -> Result<bool, DevelopmentError> {
+    let Some(init) = namespace_init(owner) else {
+        return Ok(false);
+    };
+    let pid = i32::try_from(init).map_err(|_| {
+        DevelopmentError::InvalidInput("Android init PID exceeds Linux pid_t".into())
+    })?;
+    // SAFETY: pidfd_open takes scalar arguments and returns a fresh descriptor.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(false)
+        } else {
+            Err(io_error("open Android init", error))
+        };
+    }
+    let fd = i32::try_from(fd)
+        .map_err(|_| DevelopmentError::InvalidInput("pidfd exceeds a file descriptor".into()))?;
+    // SAFETY: successful pidfd_open transferred ownership of this descriptor.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    // The descriptor names the process that had the PID when it was opened:
+    // it is the namespace's PID 1 only if the owner is still its parent.
+    if parent_pid(init) != Some(owner) {
+        return Ok(false);
+    }
+    // SAFETY: a valid pidfd, a signal number and no siginfo.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd.as_raw_fd(),
+            signal,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if result == 0 {
+        Ok(true)
+    } else {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(false)
+        } else {
+            Err(io_error("signal Android init", error))
+        }
+    }
 }
 
 fn signal_process(pid: u32, signal: libc::c_int) -> Result<(), DevelopmentError> {
