@@ -14,9 +14,10 @@ use std::{
 use clap::{Parser, Subcommand, ValueEnum};
 use droidloom_supervisor::boot_notice::BootNotice;
 use droidloom_supervisor::control::{
-    ControlRequest, ControlResponse, DEFAULT_CELL_SPEC, DEFAULT_CONTROL_SOCKET, request,
-    request_with_progress,
+    AndroidApplication, ControlRequest, ControlResponse, DEFAULT_CELL_SPEC,
+    DEFAULT_CONTROL_SOCKET, request, request_with_progress,
 };
+use droidloom_supervisor::desktop_notice::DesktopNotice;
 use droidloom_supervisor::on_demand::{self, START_LOCK_TIMEOUT, StartLock};
 use droidloom_window_policy::{
     LogicalSize, SessionMode, WindowPolicyPaths, WindowPolicyStore, WindowPreference,
@@ -41,12 +42,17 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Install a standalone APK, updating an existing app while retaining its data.
+    /// A stopped Droidloom is started first, and set up first if it never was.
     Install {
         /// Host path to a standalone APK (split APK bundles are unsupported).
         apk: PathBuf,
         /// Android user identifier.
         #[arg(long, default_value_t = 0)]
         user: u32,
+        /// Show how the install goes, and which app it installed, in a
+        /// desktop notification (for the desktop entry that opens APK files).
+        #[arg(long)]
+        notify: bool,
     },
     /// Write Android's whole storage to FILE, or to standard output for -.
     /// Android stops while it runs and starts again after.
@@ -269,13 +275,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             cli.command,
             Command::Start { no_wait: false, .. } | Command::Restart { no_wait: false, .. }
         );
-    let mut response = if let Command::Install { apk, user } = &cli.command {
-        droidloom_supervisor::control::install_apk_with_progress(
-            &cli.socket,
-            apk,
-            *user,
-            &mut report,
-        )?
+    let mut response = if let Command::Install { apk, user, notify } = &cli.command {
+        if cli.cell || cli.socket != Path::new(DEFAULT_CONTROL_SOCKET) {
+            droidloom_supervisor::control::install_apk_with_progress(
+                &cli.socket,
+                apk,
+                *user,
+                &mut report,
+            )?
+        } else {
+            install_starting_droidloom(cli.json, apk, *user, *notify)?
+        }
     } else {
         let control_request = match cli.command {
             Command::Install { .. } => unreachable!("handled with its APK file descriptor"),
@@ -595,6 +605,156 @@ fn launch_starting_droidloom(
     )
 }
 
+/// What an install changed in Android's launcher list.
+#[derive(Debug, Eq, PartialEq)]
+enum Installed {
+    /// An app that was not there, by the name of its launcher entry.
+    New(String),
+    /// An app that was there: an entry's icon key, which carries the
+    /// package's last update time, changed.
+    Updated(String),
+    /// No entry changed: the app has none, or the list could not be read.
+    Unlisted,
+}
+
+impl Installed {
+    /// The first entry of `after` that `before` lacks or had with another
+    /// icon key; new when `before` had nothing of its package.
+    fn between(before: &[AndroidApplication], after: &[AndroidApplication]) -> Self {
+        let changed = after.iter().find(|entry| {
+            !before.iter().any(|old| {
+                old.component == entry.component && old.icon_key == entry.icon_key
+            })
+        });
+        match changed {
+            Some(entry) if before.iter().any(|old| old.package == entry.package) => {
+                Self::Updated(entry.name.clone())
+            }
+            Some(entry) => Self::New(entry.name.clone()),
+            None => Self::Unlisted,
+        }
+    }
+
+    /// The notification's title and text for `file`.
+    fn summary(&self, file: &str) -> (String, &'static str) {
+        match self {
+            Self::New(name) => (format!("Installed {name}"), "It is in the app list."),
+            Self::Updated(name) => (format!("Updated {name}"), "Its data was kept."),
+            Self::Unlisted => (
+                format!("Installed {file}"),
+                "Android shows no app icon for it.",
+            ),
+        }
+    }
+}
+
+/// How long the notification of an install that worked stays; one that
+/// failed stays until dismissed.
+const RESULT_SHOWN_MS: u32 = 10_000;
+
+/// Installs an APK the person opened, first starting Droidloom if it is
+/// stopped, and setting it up if it never was, as `start` does (setup asks
+/// for an administrator through polkit's agent). The answer names the app it
+/// installed; with `notify` a desktop notification follows the install and
+/// ends with that, or with why it failed.
+fn install_starting_droidloom(
+    json: bool,
+    apk: &Path,
+    user: u32,
+    notify: bool,
+) -> Result<ControlResponse, Box<dyn std::error::Error>> {
+    let file = apk.file_name().map_or_else(
+        || apk.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let notice = notify.then(DesktopNotice::new);
+    let title = format!("Installing {file}");
+    let step = |body: &str| {
+        if let Some(notice) = &notice {
+            notice.show(&title, body, 0);
+        }
+    };
+    let result = install_naming_app(json, apk, user, &step);
+    match (&notice, &result) {
+        (Some(notice), Ok((_, installed))) => {
+            let (summary, body) = installed.summary(&file);
+            notice.show(&summary, body, RESULT_SHOWN_MS);
+        }
+        (Some(notice), Err(error)) => {
+            let why = error.to_string();
+            notice.show(
+                &format!("Could not install {file}"),
+                why.lines().next().unwrap_or_default(),
+                0,
+            );
+        }
+        (None, _) => {}
+    }
+    let (mut response, installed) = result?;
+    let (summary, body) = installed.summary(&file);
+    response.message = format!("{summary}. {body}");
+    Ok(response)
+}
+
+fn install_naming_app(
+    json: bool,
+    apk: &Path,
+    user: u32,
+    step: &dyn Fn(&str),
+) -> Result<(ControlResponse, Installed), Box<dyn std::error::Error>> {
+    let socket = Path::new(DEFAULT_CONTROL_SOCKET);
+    let report = |message: &str| {
+        if !json {
+            eprintln!("{message}");
+        }
+    };
+    // What is no APK is refused before Android starts for it.
+    droidloom_supervisor::control::validate_apk(apk)?;
+    let list = ControlRequest::ListApplications { user };
+    // The launcher list before the install; reading it finds Droidloom
+    // stopped as a launch does, and starts it the same way.
+    let before = on_demand::launch(
+        &mut || request_with_progress(socket, &list, &mut |message| report(message)),
+        &mut || {
+            if Path::new(DEFAULT_CELL_SPEC).is_file() {
+                step("Android is starting.");
+            } else {
+                step("Setting up Android first: enter your password when asked.");
+            }
+            report("Droidloom is not running; starting it for this install...");
+            Ok::<_, Box<dyn std::error::Error>>(StartLock::acquire(
+                &session_directory()?,
+                START_LOCK_TIMEOUT,
+                &mut || report("Another launch is already starting Droidloom; waiting for it..."),
+            )?)
+        },
+        &mut || {
+            report(session_lifecycle("start", json, None, false)?);
+            Ok(())
+        },
+    )?;
+    let before = if before.ok { before.applications } else { None };
+    step("Installing the app.");
+    let response = droidloom_supervisor::control::install_apk_with_progress(
+        socket,
+        apk,
+        user,
+        &mut |message| report(message),
+    )?;
+    if !response.ok {
+        return Err(response.message.into());
+    }
+    let after = request(socket, &list)
+        .ok()
+        .filter(|answer| answer.ok)
+        .and_then(|answer| answer.applications);
+    let installed = match (before, after) {
+        (Some(before), Some(after)) => Installed::between(&before, &after),
+        _ => Installed::Unlisted,
+    };
+    Ok((response, installed))
+}
+
 /// The session's private Droidloom runtime directory, made if missing.
 fn session_directory() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let runtime =
@@ -762,6 +922,54 @@ mod tests {
             Some(PathBuf::from("/h/.config/droidloom/density-v1.json"))
         );
         assert_eq!(density_file(None, Some("relative".into())), None);
+    }
+
+    fn entry(name: &str, component: &str, icon_key: &str) -> AndroidApplication {
+        AndroidApplication {
+            name: name.into(),
+            package: component.split('/').next().unwrap().into(),
+            component: component.into(),
+            icon_key: icon_key.into(),
+        }
+    }
+
+    #[test]
+    fn an_install_is_named_by_the_launcher_entry_it_changed() {
+        let files = entry("Files", "com.android.files/.Files", "1:100:7:ab");
+        let shop = entry("Shop", "org.shop/.Main", "3:200:9:ab");
+        let before = vec![files.clone(), shop.clone()];
+
+        // A new package: its entry is new.
+        let game = entry("Game", "org.game/.Play", "1:300:5:ab");
+        let after = vec![files.clone(), game, shop.clone()];
+        assert_eq!(
+            Installed::between(&before, &after),
+            Installed::New("Game".into())
+        );
+
+        // An update, even of the same version: the last update time in the
+        // icon key moves.
+        let updated = entry("Shop", "org.shop/.Main", "3:250:9:ab");
+        let after = vec![files.clone(), updated];
+        assert_eq!(
+            Installed::between(&before, &after),
+            Installed::Updated("Shop".into())
+        );
+
+        // An update that adds an entry to a package that was there.
+        let extra = entry("Shop deals", "org.shop/.Deals", "4:260:9:ab");
+        let after = vec![files.clone(), extra, shop.clone()];
+        assert_eq!(
+            Installed::between(&before, &after),
+            Installed::Updated("Shop deals".into())
+        );
+
+        // Nothing in the list changed: an app without a launcher entry.
+        assert_eq!(Installed::between(&before, &before), Installed::Unlisted);
+        assert_eq!(
+            Installed::Unlisted.summary("tool.apk").0,
+            "Installed tool.apk"
+        );
     }
 
     #[test]

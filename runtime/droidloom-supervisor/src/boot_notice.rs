@@ -73,22 +73,7 @@ impl BootNotice {
     }
 
     fn show(&mut self, summary: &str, body: &str, timeout_ms: u32) {
-        let replaces = self.id.to_string();
-        let timeout = timeout_ms.to_string();
-        let shown = busctl(&[
-            "Notify",
-            "susssasa{sv}i",
-            "Droidloom",
-            &replaces,
-            "",
-            summary,
-            body,
-            "0",
-            "0",
-            &timeout,
-        ]);
-        // "u 42": the ID of the notice shown.
-        let Some(id) = shown.and_then(|reply| reply.trim().strip_prefix("u ")?.parse().ok()) else {
+        let Some(id) = notify(self.id, summary, body, timeout_ms) else {
             return;
         };
         self.id = id;
@@ -109,6 +94,29 @@ fn record() -> Option<PathBuf> {
     runtime
         .is_absolute()
         .then(|| runtime.join("droidloom/boot-notice"))
+}
+
+/// Shows a Droidloom notification in place of the one with ID `replaces`
+/// (0: a new one), for `timeout_ms` (0: until dismissed); its ID, or None
+/// without a notification service. The timeout is never negative: busctl
+/// would take "-1" for an option of its own.
+pub(crate) fn notify(replaces: u32, summary: &str, body: &str, timeout_ms: u32) -> Option<u32> {
+    let replaces = replaces.to_string();
+    let timeout = timeout_ms.to_string();
+    let shown = busctl(&[
+        "Notify",
+        "susssasa{sv}i",
+        "Droidloom",
+        &replaces,
+        "",
+        summary,
+        body,
+        "0",
+        "0",
+        &timeout,
+    ]);
+    // "u 42": the ID of the notice shown.
+    shown.and_then(|reply| reply.trim().strip_prefix("u ")?.parse().ok())
 }
 
 /// Calls the session's notification service; None without one.

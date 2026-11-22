@@ -11,6 +11,7 @@ mod authentication;
 pub mod cgroup_delegation;
 mod app_properties;
 pub mod boot_notice;
+pub mod desktop_notice;
 pub mod control;
 mod cpu_placement;
 pub mod development;

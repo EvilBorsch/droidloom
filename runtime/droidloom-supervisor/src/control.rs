@@ -1370,6 +1370,21 @@ pub fn install_apk(socket: &Path, path: &Path, user: u32) -> Result<ControlRespo
     install_apk_reporting(socket, path, user, None)
 }
 
+/// Refuse `path` unless it is a standalone APK the caller can read, as an
+/// install would, before anything is started for it.
+///
+/// # Errors
+/// Returns the failure to open the file, or that it is no APK.
+pub fn validate_apk(path: &Path) -> Result<(), ControlError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|source| io_error(&format!("open APK {}", path.display()), source))?;
+    apk::validate(&file).map(drop)
+}
+
 /// Install an APK with boot and installation progress and a bounded wait.
 ///
 /// # Errors
