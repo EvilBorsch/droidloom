@@ -1,4 +1,4 @@
-# Droidloom upstream pinned for the erhai distribution (read by tools/eb-build-debs).
+# Droidloom upstream pinned for the erhai distribution (read by tools/eb-build-debs and tools/eb-build-runtime).
 # Release "packages" of github.com/denialwm/droidloom, pkgrel 49, published 2026-11-20.
 # The SHA-256 values are the digests GitHub reports for the release assets
 # (gh release view packages -R denialwm/droidloom --json assets); the files

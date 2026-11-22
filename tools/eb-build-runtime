@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# Cross-builds the host programs of droidloom-runtime for arm64 from one
+# commit of this fork, as upstream's package build does (cargo build --locked
+# --release --target aarch64-unknown-linux-gnu, same packages), but against
+# an Ubuntu arm64 root made by tools/eb-arm64-sysroot.
+# (EvilBorsch fork; see docs/EB-BUILD.md.)
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+LOCK="$REPO/packaging/eb-ubuntu/upstream.lock"
+TARGET=aarch64-unknown-linux-gnu
+
+usage() {
+    cat >&2 <<USAGE
+Usage: $0 SYSROOT OUT_DIR [REF]
+
+Builds the programs droidloom-runtime ships from commit REF (default HEAD)
+of this repository. REF is exported with git archive, so uncommitted changes
+never enter the build. OUT_DIR must not exist or be empty; it receives
+
+  root/usr/bin/droidloom*, root/usr/lib/droidloom/droidloom-package-helper
+                     the programs, at their paths in the package
+  source-commit      the commit they were built from
+  source-date        its committer date (seconds since 1970)
+  source-changes     the commits between upstream's release and it
+  needed.txt         PROGRAM SONAME UBUNTU-PACKAGE for every library linked
+  glibc-max          the newest GLIBC symbol version any program needs
+  BUILD-INFO.txt     all of that with hashes, compiler and root versions
+  sysroot-packages.txt  the root's exact packages
+
+EB_WORK (default ~/work-droidloom-runtime) holds the source export and the
+Cargo target directory, EB_JOBS (default 8) the job count.
+USAGE
+    exit 2
+}
+
+[[ $# -ge 2 && $# -le 3 ]] || usage
+SYSROOT="$(realpath -- "$1")"
+OUT="$2"
+REF="${3:-HEAD}"
+WORK="$(realpath -m -- "${EB_WORK:-$HOME/work-droidloom-runtime}")"
+JOBS="${EB_JOBS:-8}"
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+# shellcheck source=packaging/eb-ubuntu/upstream.lock
+. "$LOCK"
+
+# Upstream's host build (HOST_PACKAGES in tools/droidloom-update/src/
+# assemble.rs). Cargo unifies features over the packages built together, so
+# the same set is built; droidloom-update is built but, as upstream does, not
+# packaged.
+PACKAGES=(droidloom-supervisor droidloom-wayland droidloom-applications droidloom-audio
+    droidloom-gpu-server droidloom-devices droidloom-doctor droidloom-update
+    droidloom-package-support)
+# What droidloom-runtime ships, as Cargo binary:path in the package
+# (HOST_BINARIES without droidloom-update, plus the package helper; see
+# package_layout in tools/droidloom-update/src/package.rs).
+BINARIES=(
+    droidloomd:usr/bin/droidloomd
+    droidloomctl:usr/bin/droidloomctl
+    droidloom-supervisor:usr/bin/droidloom-supervisor
+    droidloom-wayland:usr/bin/droidloom-wayland
+    droidloom-applications:usr/bin/droidloom-applications
+    droidloom-audio:usr/bin/droidloom-audio
+    droidloom-gpu-server:usr/bin/droidloom-gpu-server
+    droidloom-devices:usr/bin/droidloom-devices
+    droidloom-doctor:usr/bin/droidloom-doctor
+    droidloom-package-helper:usr/lib/droidloom/droidloom-package-helper
+)
+
+if [[ -f "$HOME/.cargo/env" ]]; then
+    # shellcheck source=/dev/null
+    . "$HOME/.cargo/env"
+fi
+for tool in git cargo rustup aarch64-linux-gnu-gcc pkg-config glslangValidator readelf sha256sum dpkg; do
+    command -v "$tool" >/dev/null || die "missing $tool (see docs/EB-BUILD.md, Prerequisites)"
+done
+libdir="$SYSROOT/usr/lib/aarch64-linux-gnu"
+[[ -d "$libdir/pkgconfig" && -f "$SYSROOT/EB-SYSROOT-FILES.txt" ]] \
+    || die "$SYSROOT is not a root made by tools/eb-arm64-sysroot"
+[[ "$SYSROOT$WORK" != *[[:space:]]* ]] || die "the root and EB_WORK paths must not contain whitespace"
+if [[ -e "$OUT" ]]; then
+    [[ -d "$OUT" && -z "$(ls -A -- "$OUT")" ]] || die "$OUT exists and is not empty"
+fi
+
+commit="$(git -C "$REPO" rev-parse --verify "$REF^{commit}")"
+# The programs must belong to the upstream release whose other files the
+# package carries, with the compiler and crates of that release: the
+# package's Cargo notices (usr/share/licenses/droidloom-runtime/rust) are
+# generated from upstream's Cargo.lock.
+git -C "$REPO" merge-base --is-ancestor "$DROIDLOOM_COMMIT" "$commit" \
+    || die "$commit does not contain upstream release $DROIDLOOM_PKGREL ($DROIDLOOM_COMMIT)"
+git -C "$REPO" diff --quiet "$DROIDLOOM_COMMIT" "$commit" -- Cargo.lock rust-toolchain.toml \
+    || die "Cargo.lock or rust-toolchain.toml differ from upstream release $DROIDLOOM_PKGREL"
+
+src="$WORK/src"
+rm -rf -- "$src"
+mkdir -p -- "$src" "$WORK/target"
+git -C "$REPO" archive --format=tar "$commit" | tar -x -C "$src"
+
+# The program lists above must still be upstream's.
+upstream_list() {
+    sed -n "/^pub const $1/,/^\];/p" "$src/tools/droidloom-update/src/assemble.rs" \
+        | grep -o '"[^"]*"' | tr -d '"' | sort | tr '\n' ' '
+}
+ours_packages="$(printf '%s\n' "${PACKAGES[@]}" | sort | tr '\n' ' ')"
+ours_binaries="$(printf '%s\n' "${BINARIES[@]%%:*}" droidloom-update | grep -vx droidloom-package-helper | sort | tr '\n' ' ')"
+[[ "$(upstream_list HOST_PACKAGES)" == "$ours_packages" ]] \
+    || die "upstream's HOST_PACKAGES changed: $(upstream_list HOST_PACKAGES)"
+[[ "$(upstream_list HOST_BINARIES)" == "$ours_binaries" ]] \
+    || die "upstream's HOST_BINARIES changed: $(upstream_list HOST_BINARIES)"
+
+cd -- "$src"
+# rustup takes the compiler from the exported rust-toolchain.toml.
+channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+rustc --version | grep -q "^rustc $channel " || die "rustup did not select Rust $channel: $(rustc --version)"
+rustup target list --installed | grep -qx "$TARGET" \
+    || die "Rust $channel lacks $TARGET: rustup target add $TARGET --toolchain $channel"
+
+# Flags in the environment describe the build machine (upstream removes them
+# too); the target's own flags point the linker at the root.
+unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+# droidloom-audio's build script runs pkg-config itself for PipeWire's
+# headers, so the root's pkg-config directories are set unsuffixed.
+export PKG_CONFIG_ALLOW_CROSS=1
+export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
+export PKG_CONFIG_LIBDIR="$libdir/pkgconfig:$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig"
+export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+export CFLAGS_aarch64_unknown_linux_gnu="--sysroot=$SYSROOT"
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+cargo_home="$(realpath -m -- "${CARGO_HOME:-$HOME/.cargo}")"
+# The root's library directory goes first: the cross compiler's built-in one
+# holds linker scripts that name the build machine's /lib. The path
+# remappings keep this machine's home directory out of the programs' panic
+# locations; Cargo's registry gets the path upstream's builder uses.
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=--sysroot=$SYSROOT -C link-arg=-L$libdir -C link-arg=-Wl,-rpath-link,$libdir --remap-path-prefix=$cargo_home=/build/cargo-home --remap-path-prefix=$WORK=/build"
+export CARGO_TARGET_DIR="$WORK/target"
+
+package_args=()
+for package in "${PACKAGES[@]}"; do
+    package_args+=(-p "$package")
+done
+cargo build --locked --release --jobs "$JOBS" --target "$TARGET" "${package_args[@]}"
+
+release="$CARGO_TARGET_DIR/$TARGET/release"
+mkdir -p -- "$OUT"
+OUT="$(realpath -- "$OUT")"
+libc_version="$(sed -n 's/^libc6_\([^_]*\)_arm64\.deb$/\1/p' "$SYSROOT/EB-SYSROOT-PACKAGES.txt")"
+libc_upstream="${libc_version%%-*}"
+: > "$OUT/needed.txt"
+glibc_max=0
+for entry in "${BINARIES[@]}"; do
+    name="${entry%%:*}" path="${entry#*:}"
+    install -D -m 0755 "$release/$name" "$OUT/root/$path"
+    file="$OUT/root/$path"
+    machine="$(od -An -j18 -N2 -tu2 -- "$file" | tr -d '[:space:]')"
+    [[ "$machine" == 183 ]] || die "$name is not an aarch64 ELF file"
+    # Every library must come from a package of the Ubuntu root.
+    while read -r soname; do
+        owner="$(awk -v lib="$soname" '$2 ~ "^/(usr/)?lib/aarch64-linux-gnu/[^/]*$" {
+                n = split($2, part, "/"); if (part[n] == lib) { print $1; exit } }' \
+            "$SYSROOT/EB-SYSROOT-FILES.txt")"
+        [[ -n "$owner" ]] || die "$name needs $soname, which no package of the Ubuntu root provides"
+        printf '%s %s %s\n' "$path" "$soname" "$owner" >> "$OUT/needed.txt"
+    done < <(readelf -dW "$file" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')
+    newest="$(readelf -VW "$file" | grep -o 'Name: GLIBC_[0-9.]*' | sed 's/.*GLIBC_//' | sort -V | tail -1)"
+    if dpkg --compare-versions "$newest" gt "$glibc_max"; then glibc_max="$newest"; fi
+done
+dpkg --compare-versions "$glibc_max" le "$libc_upstream" \
+    || die "the programs need GLIBC_$glibc_max, newer than the root's glibc $libc_upstream"
+printf '%s\n' "$glibc_max" > "$OUT/glibc-max"
+printf '%s\n' "$commit" > "$OUT/source-commit"
+git -C "$REPO" log -1 --format=%ct "$commit" > "$OUT/source-date"
+git -C "$REPO" log --no-merges --format='%h %s' "$DROIDLOOM_COMMIT..$commit" -- . \
+    ':(exclude)tools/eb-*' ':(exclude)packaging/eb-ubuntu' ':(exclude)docs/EB-BUILD.md' \
+    > "$OUT/source-changes"
+cp -- "$SYSROOT/EB-SYSROOT-PACKAGES.txt" "$OUT/sysroot-packages.txt"
+
+{
+    printf 'source: commit %s (%s)\n' "$commit" "$REF"
+    printf 'upstream: Droidloom %s-%s, commit %s\n' "$DROIDLOOM_PKGVER" "$DROIDLOOM_PKGREL" "$DROIDLOOM_COMMIT"
+    printf 'changes since upstream:\n'
+    sed 's/^/  /' "$OUT/source-changes"
+    printf 'rustc: %s\n' "$(rustc -vV | tr '\n' ' ')"
+    printf 'cc: %s\n' "$(aarch64-linux-gnu-gcc --version | head -1)"
+    printf 'glslang: %s\n' "$(glslangValidator --version | head -1)"
+    printf 'root: %s, libc6 %s, %s packages\n' "$SYSROOT" "$libc_version" "$(wc -l < "$OUT/sysroot-packages.txt")"
+    printf 'newest GLIBC symbol version needed: %s\n\n' "$glibc_max"
+    for entry in "${BINARIES[@]}"; do
+        path="${entry#*:}"
+        printf '%s  %s\n' "$(sha256sum < "$OUT/root/$path" | cut -d' ' -f1)" "$path"
+        printf '  NEEDED: %s\n' "$(awk -v p="$path" '$1 == p { printf "%s (%s) ", $2, $3 }' "$OUT/needed.txt")"
+        printf '  GLIBC: %s\n' "$(readelf -VW "$OUT/root/$path" | grep -o 'Name: GLIBC_[0-9.]*' | sed 's/.*GLIBC_//' | sort -uV | tail -1)"
+    done
+} > "$OUT/BUILD-INFO.txt"
+cat "$OUT/BUILD-INFO.txt"
