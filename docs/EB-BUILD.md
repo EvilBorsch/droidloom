@@ -247,6 +247,29 @@ same maintainer scripts and `Depends`; only the ten programs, `control`,
 installs with `droidloom-image` and `droidloom-base` `0.1.0-49+eb1`. Not yet
 run on a device.
 
+### 0.1.0-49+eb4
+
+`droidloom-runtime_0.1.0-49+eb4_arm64.deb`, 22.11.2026, SHA-256
+`62517e257e4033d9d6e1beb125b63f612fe3ae8c18e6ca82465b8eeb9ec4b484`: programs
+from `9add222f805912b2d28a9c29258920d1419b5428` (`eb3`'s `2712d37` +
+`e20c4cb` + `1805815`; `8f37ec6` and `9add222` change no program source, and
+the programs built from `1805815` and from `9add222` are bit-identical).
+Against `0.1.0-49+eb3`:
+
+- 643 entries instead of 640: `/usr/lib/udev/`, `/usr/lib/udev/rules.d/` and
+  `60-droidloom-loop.rules` (644, root); every other entry has the same mode
+  and owner;
+- five programs differ, the ones built with the supervisor's library or the
+  catalog: `droidloomd`, `droidloomctl`, `droidloom-supervisor`,
+  `droidloom-applications`, `droidloom-package-helper`; the other five are
+  the same files;
+- `README.Debian`, `copyright`, `changelog.Debian.gz`, `control` (version,
+  size, commit, description), `md5sums` and `postinst` (the udev lines)
+  differ; `prerm`, `postrm`, `triggers` and `Depends` are the same.
+
+It installs with `droidloom-image` and `droidloom-base` `0.1.0-49+eb1`. Not
+yet run on a device.
+
 ## Another upstream release
 
 1. Merge the release's commit into the fix branches and this one, and check
