@@ -1,0 +1,34 @@
+Droidloom on the erhai Ubuntu distribution
+==========================================
+
+These packages are the upstream Arch Linux ARM packages repacked unchanged:
+droidloom-runtime (host programs), droidloom-image (Android vendor image and
+framework overrides) and droidloom-base (AOSP system, system_ext and product
+images). Runtime and image always come from the same upstream release; the
+image names the base release it needs.
+
+The kernel needs Binder with binderfs, EROFS with LZ4, policy routing and the
+other options listed in the research report (research/droidloom/README.md in
+the distribution workspace). `droidloom-doctor --format json --pretty` checks
+most of them without changing anything.
+
+First start, as the desktop user inside the Wayland session (not with sudo):
+
+    droidloomctl start
+
+It asks for administrator authentication once (pkexec) to write
+/etc/droidloom/cell.json, /etc/droidloom/runtime.env, the polkit rule
+/etc/polkit-1/rules.d/49-droidloom.rules and Android's data directory
+/var/lib/droidloom/users/UID/data. Then:
+
+    droidloomctl applications
+    droidloomctl launch com.android.settings
+    droidloomctl install /path/to/app.apk
+    droidloomctl stop
+
+To start Android with every graphical session:
+    systemctl --user enable droidloom.service
+
+Removing the packages keeps /etc/droidloom/cell.json and Android's data;
+purging droidloom-runtime removes /etc/droidloom. Android's data in
+/var/lib/droidloom is only removed by hand.

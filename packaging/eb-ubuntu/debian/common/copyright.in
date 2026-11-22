@@ -1,0 +1,32 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Droidloom
+Upstream-Contact: https://github.com/denialwm/droidloom
+Source: https://github.com/denialwm/droidloom/releases/download/packages/droidloom-source-@PKGVER@-@PKGREL@.tar.gz
+Comment: The binaries in this package are the unchanged contents of the
+ upstream Arch Linux ARM package @PACKAGE@ @PKGVER@-@PKGREL@, built from
+ commit @COMMIT@. The complete license texts and notices shipped by upstream
+ are in /usr/share/doc/@PACKAGE@/licenses/ (upstream path
+ /usr/share/licenses/@PACKAGE@/): LICENSE, LICENSES/, THIRD_PARTY.md and,
+ where present, the Cargo crate notices (rust/), the Android notice catalog
+ (Android-NOTICE.xml.gz) and the Mesa licenses (mesa/, Mesa-license.rst).
+ .
+ Corresponding source: Droidloom's own code is in the source tarball above.
+ Android components are built from AOSP tag android-17.0.0_r1 (manifest
+ commit 5bc9a7ce1cd78dd53613bbfd0ebf506e1e4adb0f) with Droidloom's patches;
+ the base partitions are Android CI build 15885347 (CP2A.260605.016,
+ aosp_cf_arm64_only_phone-userdebug); Mesa 26.3.0. The exact inputs are
+ pinned in android/manifest/ of the Droidloom source.
+
+Files: *
+Copyright: 2026 Doctor Logix and Droidloom contributors
+License: GPL-3.0-or-later
+ On Debian and Ubuntu systems the full text is in
+ /usr/share/common-licenses/GPL-3.
+
+Files: usr/lib/droidloom/images/* usr/lib/droidloom/runtime/* usr/lib/droidloom/storage/*
+Copyright: The Android Open Source Project; the Mesa authors; the ANGLE authors; Droidloom contributors
+License: Apache-2.0 and BSD and MIT and GPL-3.0-or-later and others
+ Android, Mesa and ANGLE code keeps its upstream licenses, predominantly
+ Apache-2.0 (AOSP), MIT (Mesa) and BSD-3-Clause (ANGLE); Droidloom's patches
+ and additions are GPL-3.0-or-later. The per-component notices are in
+ Android-NOTICE.xml.gz and the mesa/ directory next to this file.

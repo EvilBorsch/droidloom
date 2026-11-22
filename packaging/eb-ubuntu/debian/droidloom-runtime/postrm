@@ -1,0 +1,23 @@
+#!/bin/sh
+# After removal: reload systemd. On purge also remove the configuration the
+# setup helper wrote. Android's data under /var/lib/droidloom is never
+# removed by the package: it holds the user's apps and accounts. Delete it by
+# hand to wipe Android.
+set -e
+case "$1" in
+remove|purge)
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload
+	fi
+	;;
+esac
+if [ "$1" = purge ]; then
+	rm -f /etc/droidloom/cell.json /etc/droidloom/runtime.env \
+		/etc/droidloom/package-state.json /etc/droidloom/setup.lock \
+		/etc/polkit-1/rules.d/49-droidloom.rules
+	rmdir /etc/droidloom 2>/dev/null || :
+	if [ -d /var/lib/droidloom ]; then
+		echo "droidloom-runtime: Android data in /var/lib/droidloom is kept; delete it to wipe Android."
+	fi
+fi
+exit 0

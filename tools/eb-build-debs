@@ -1,0 +1,124 @@
+#!/bin/bash
+# Builds Droidloom's .deb packages for the arm64 erhai Ubuntu distribution from the
+# pinned upstream Arch Linux ARM packages (packaging/eb-ubuntu/upstream.lock): the
+# files are repacked unchanged; pacman's metadata and hooks are replaced by Debian
+# control files and maintainer scripts. Each .deb is then checked file by file
+# against upstream's .MTREE. (EvilBorsch fork; see docs/EB-BUILD.md.)
+#
+#   eb-build-debs [EB]     EB: our packaging revision, default eb1 -> 0.1.0-49+eb1
+#
+# Runs as an ordinary user (dpkg-deb --root-owner-group; no sudo).
+# Environment: PKGS  upstream .pkg.tar.zst files (downloaded there when missing)
+#              OUT   where the .debs and their .sha256 go
+#              WORK  staging on ext4 (symlinks and modes), emptied after each package
+#              THREADS  zstd threads (default 4: other builds may be running)
+#              PKGS, OUT and WORK default to ~/work-droidloom-debs/{pkgs,out,stage}.
+set -euo pipefail
+export LC_ALL=C
+
+here=$(cd "$(dirname "$0")/../packaging/eb-ubuntu" && pwd)
+. "$here/upstream.lock"
+EB=${1:-eb1}
+PKGS=${PKGS:-$HOME/work-droidloom-debs/pkgs}
+OUT=${OUT:-$HOME/work-droidloom-debs/out}
+WORK=${WORK:-$HOME/work-droidloom-debs/stage}
+THREADS=${THREADS:-4}
+check="python3 -I $here/check-archive.py"
+
+case "$EB" in eb[0-9]*) ;; *) echo "packaging revision must look like eb1" >&2; exit 2;; esac
+V=$DROIDLOOM_PKGVER R=$DROIDLOOM_PKGREL
+BV=$DROIDLOOM_BASE_PKGVER BR=$DROIDLOOM_BASE_PKGREL
+for tool in dpkg-deb zstd python3 sha256sum curl; do
+	command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 1; }
+done
+mkdir -p "$PKGS" "$OUT" "$WORK"
+
+# Download when missing, then always check the pinned SHA-256.
+fetch() {
+	local name=$1 sum=$2 file="$PKGS/$1"
+	if [ ! -f "$file" ]; then
+		curl -fL --retry 3 -o "$file.part" "$DROIDLOOM_URL/$name"
+		mv "$file.part" "$file"
+	fi
+	echo "$sum  $file" | sha256sum -c --quiet - || { echo "$name: SHA-256 differs from upstream.lock" >&2; exit 1; }
+}
+RUNTIME=droidloom-runtime-$V-$R-aarch64.pkg.tar.zst
+IMAGE=droidloom-image-$V-$R-aarch64.pkg.tar.zst
+BASE=droidloom-base-$BV-$BR-aarch64.pkg.tar.zst
+fetch "$RUNTIME" "$SHA256_RUNTIME"
+fetch "$IMAGE" "$SHA256_IMAGE"
+fetch "$BASE" "$SHA256_BASE"
+
+# .PKGINFO is the archive's first member; --occurrence stops tar there instead
+# of reading the whole (up to 900 MB) archive.
+pkginfo() { tar --zstd -xOf "$PKGS/$1" --occurrence=1 .PKGINFO | sed -n "s/^$2 = //p"; }
+die() { echo "$*" >&2; exit 1; }
+# The upstream packages must be the ones upstream.lock names, and the image
+# must want this base.
+[ "$(pkginfo "$RUNTIME" pkgver)" = "$V-$R" ] || die "$RUNTIME is not $V-$R"
+[ "$(pkginfo "$RUNTIME" arch)" = aarch64 ] || die "$RUNTIME is not aarch64"
+[ "$(pkginfo "$IMAGE" pkgver)" = "$V-$R" ] || die "$IMAGE is not $V-$R"
+[ "$(pkginfo "$BASE" pkgver)" = "$BV-$BR" ] || die "$BASE is not $BV-$BR"
+[ "$(pkginfo "$IMAGE" depend)" = "droidloom-base=$BV-$BR" ] || die "the image wants another base: $(pkginfo "$IMAGE" depend)"
+pkginfo "$RUNTIME" depend | grep -qx "droidloom-image=$V-$R" || die "the runtime wants another image"
+
+# build PACKAGE UPSTREAM_FILE DEB_VERSION
+build() {
+	local pkg=$1 upstream="$PKGS/$2" version=$3 st="$WORK/$1" deb
+	deb="$OUT/${pkg}_${version}_arm64.deb"
+	$check guard "$upstream"
+	rm -rf "$st"; mkdir -p "$st"
+	tar --zstd -xf "$upstream" -C "$st" --preserve-permissions --no-same-owner
+	# pacman's own files: metadata and transaction hooks (replaced by DEBIAN/*).
+	rm -f "$st/.PKGINFO" "$st/.BUILDINFO" "$st/.MTREE" "$st/.INSTALL"
+	rm -rf "$st/usr/share/libalpm"
+	# Debian keeps license texts with the package's documentation.
+	mkdir -p "$st/usr/share/doc/$pkg"
+	if [ -d "$st/usr/share/licenses/$pkg" ]; then
+		mv "$st/usr/share/licenses/$pkg" "$st/usr/share/doc/$pkg/licenses"
+		rmdir "$st/usr/share/licenses"
+	fi
+	sed -e "s|@PACKAGE@|$pkg|g" -e "s|@PKGVER@|$V|g" -e "s|@PKGREL@|$R|g" \
+		-e "s|@COMMIT@|$DROIDLOOM_COMMIT|g" \
+		"$here/debian/common/copyright.in" > "$st/usr/share/doc/$pkg/copyright"
+	printf '%s (%s) resolute; urgency=medium\n\n  * Repack of upstream %s %s, files unchanged.\n\n -- EvilBorsch <44337169+EvilBorsch@users.noreply.github.com>  %s\n' \
+		"$pkg" "$version" "$pkg" "$(pkginfo "$2" pkgver)" \
+		"$(date -R -u -d "@$(pkginfo "$2" builddate)")" | gzip -9n > "$st/usr/share/doc/$pkg/changelog.Debian.gz"
+	if [ -f "$here/debian/$pkg/README.Debian" ]; then
+		install -m 0644 "$here/debian/$pkg/README.Debian" "$st/usr/share/doc/$pkg/README.Debian"
+	fi
+	chmod -R u+w,go-w "$st/usr/share/doc/$pkg"
+
+	mkdir -p "$st/DEBIAN"
+	local size
+	size=$(find "$st" -path "$st/DEBIAN" -prune -o \( -type f -o -type l \) -printf '%s\n' \
+		| awk '{s += int(($1 + 1023) / 1024)} END {print s + 0}')
+	sed -e "s|@DEB_VERSION@|$version|g" -e "s|@INSTALLED_SIZE@|$size|g" \
+		-e "s|@PKGVER@|$V|g" -e "s|@PKGREL@|$R|g" -e "s|@NEXT_PKGREL@|$((R + 1))|g" \
+		-e "s|@BASE_PKGVER@|$BV|g" -e "s|@BASE_PKGREL@|$BR|g" -e "s|@BASE_NEXT_PKGREL@|$((BR + 1))|g" \
+		-e "s|@COMMIT@|$DROIDLOOM_COMMIT|g" \
+		"$here/debian/$pkg/control.in" > "$st/DEBIAN/control"
+	if [ "$pkg" = droidloom-runtime ]; then
+		install -m 0755 "$here/debian/$pkg/prerm" "$here/debian/$pkg/postinst" "$here/debian/$pkg/postrm" "$st/DEBIAN/"
+		install -m 0644 "$here/debian/$pkg/triggers" "$st/DEBIAN/triggers"
+	else
+		install -m 0755 "$here/debian/common/preinst-stop" "$st/DEBIAN/preinst"
+		install -m 0755 "$here/debian/common/prerm-stop" "$st/DEBIAN/prerm"
+	fi
+	(cd "$st" && find . -path ./DEBIAN -prune -o -type f -printf '%P\0' | sort -z | xargs -0r md5sum) > "$st/DEBIAN/md5sums"
+	chmod 0644 "$st/DEBIAN/md5sums" "$st/DEBIAN/control"
+
+	# Clamp file times to upstream's build date, so a rebuild gives the same archive.
+	SOURCE_DATE_EPOCH=$(pkginfo "$2" builddate) \
+		dpkg-deb --root-owner-group -Zzstd -z19 --threads-max="$THREADS" --build "$st" "$deb"
+	rm -rf "$st"
+	$check verify "$upstream" "$deb"
+	(cd "$OUT" && sha256sum "$(basename "$deb")" > "$(basename "$deb").sha256")
+	dpkg-deb --field "$deb" Package Version Installed-Size Depends
+}
+
+build droidloom-runtime "$RUNTIME" "$V-$R+$EB"
+build droidloom-image "$IMAGE" "$V-$R+$EB"
+build droidloom-base "$BASE" "$BV-$BR+$EB"
+(cd "$OUT" && sha256sum droidloom-runtime_"$V-$R+$EB"_arm64.deb droidloom-image_"$V-$R+$EB"_arm64.deb \
+	droidloom-base_"$BV-$BR+$EB"_arm64.deb > "droidloom-$V-$R+$EB.SHA256SUMS" && cat "droidloom-$V-$R+$EB.SHA256SUMS")

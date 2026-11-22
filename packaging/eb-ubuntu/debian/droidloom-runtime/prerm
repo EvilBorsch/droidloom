@@ -1,0 +1,18 @@
+#!/bin/sh
+# Stops Droidloom before its files are replaced or removed.
+# Upstream (pacman) does the same with 60-droidloom-upgrade.hook and
+# 60-droidloom-remove.hook, both PreTransaction with AbortOnFail: if Android
+# cannot be stopped, the mounted images must not be replaced.
+set -e
+helper=/usr/lib/droidloom/droidloom-package-helper
+case "$1" in
+remove)
+	# Stops the runtime, removes the exported .desktop launchers and the
+	# generated polkit rule, keeps /etc/droidloom/cell.json and Android data.
+	[ ! -x "$helper" ] || "$helper" before-remove
+	;;
+upgrade|deconfigure|failed-upgrade)
+	[ ! -x "$helper" ] || "$helper" before-upgrade
+	;;
+esac
+exit 0

@@ -1,0 +1,16 @@
+#!/bin/sh
+# After installing or upgrading Droidloom, or after droidloom-image or
+# droidloom-base changed (file triggers): reload systemd and let the helper
+# refresh an existing setup. Upstream (pacman): 90-droidloom-installed.hook,
+# PostTransaction. Droidloom stays stopped; the first `droidloomctl start`
+# does the per-user setup through pkexec.
+set -e
+case "$1" in
+configure|triggered)
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload
+	fi
+	/usr/lib/droidloom/droidloom-package-helper after-install
+	;;
+esac
+exit 0

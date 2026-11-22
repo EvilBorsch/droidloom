@@ -1,0 +1,18 @@
+Package: droidloom-image
+Version: @DEB_VERSION@
+Architecture: arm64
+Maintainer: EvilBorsch <44337169+EvilBorsch@users.noreply.github.com>
+Installed-Size: @INSTALLED_SIZE@
+Depends: droidloom-base (>= @BASE_PKGVER@-@BASE_PKGREL@~), droidloom-base (<< @BASE_PKGVER@-@BASE_NEXT_PKGREL@~)
+Section: misc
+Priority: optional
+Homepage: https://github.com/denialwm/droidloom
+Description: Droidloom Android components (vendor image and framework overrides)
+ The Droidloom-built Android vendor partition (Mesa Freedreno/Turnip, Composer,
+ audio, power, Wi-Fi and allocator services) and the files Droidloom puts over
+ the AOSP base partitions: SurfaceFlinger, InputFlinger, services.jar,
+ SystemUI, IME, vold, netd and init compatibility.
+ .
+ It must match droidloom-runtime exactly; it names the droidloom-base release
+ it needs. Repacked unchanged from the upstream Arch Linux ARM package
+ droidloom-image @PKGVER@-@PKGREL@ (commit @COMMIT@).
