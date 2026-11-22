@@ -35,6 +35,9 @@ named:
 | `eb4` | the desktop entries of Android's own applications (`com.android.*`) are named "Settings (Android)", "Files (Android)" | `1805815` |
 | `eb4` | not a program: the udev rule `60-droidloom-loop.rules` and its `postinst` lines ([below](#the-loop-device-rule)) | `8f37ec6` |
 | `eb5` | Android counts as ready once ActivityManager has user 0 in `RUNNING_UNLOCKED`, not already at `sys.boot_completed`; Files (Android), launched right after a start, failed with "Activity start failed: -92" (`docs/contracts/runtime-layout-v1.md`, "Lifecycle readiness") | `a856d4d` |
+| `eb6` | `droidloom-package-helper prepare` says why pkexec ran no setup: its dialog dismissed (126), authorization not obtained or no agent (127), or the setup's own failure | `4c651ec` |
+| `eb6` | `droidloomctl install` starts a stopped Droidloom as a launch does, and sets it up first where it never was (`start`'s `prepare`, which asks for an administrator through polkit); it names the app it installed or updated, from the launcher entry that is new or has a new `icon_key` (which carries the package's last update time); `--notify` follows the start, setup and install in one desktop notification that ends with that name or the reason it failed | `1019dad` |
+| `eb6` | not a program: the desktop entry `droidloom-install-apk.desktop` ([below](#the-apk-desktop-entry)) | `2822b9c` |
 
 Android itself (`droidloom-image`, `droidloom-base`) is not changed, so it is
 not rebuilt: that is an AOSP build of tens of gigabytes and hours
@@ -190,11 +193,12 @@ For `droidloom-runtime` it also:
 - names the fork's commit and the commits since upstream's in the package
   description, `changelog.Debian.gz`, `copyright` and `README.Debian`;
 - adds the files of `debian/droidloom-runtime/added/`, now
-  `/usr/lib/udev/rules.d/60-droidloom-loop.rules` (below), with mode 644. A
-  file at a path upstream ships is refused. `check-archive.py verify
-  --added` requires exactly these files with exactly this content beside
-  upstream's, and its result ends with "1 added by this packaging:
-  /usr/lib/udev/rules.d/60-droidloom-loop.rules".
+  `/usr/lib/udev/rules.d/60-droidloom-loop.rules` and
+  `/usr/share/applications/droidloom-install-apk.desktop` (below), with
+  mode 644. A file at a path upstream ships is refused. `check-archive.py
+  verify --added` requires exactly these files with exactly this content
+  beside upstream's, and its result ends with "2 added by this packaging:"
+  and their paths.
 
 Maintainer scripts:
 
@@ -236,6 +240,24 @@ file in `/tmp` does not, and a device loses the mark when it is detached or
 set up for another file. Nothing else tells these devices apart for udev:
 the mark goes by the path alone, so a loop device a person sets up on a file
 below one of these paths is hidden from file managers too.
+
+### The APK desktop entry
+
+Opening an `.apk` in a file manager did nothing useful on the tablet: the
+one application for `application/vnd.android.package-archive` there was
+File Roller. `droidloom-install-apk.desktop` ("Install in Android",
+`Name[ru]` too; `NoDisplay`, so it is no launcher entry of its own) runs
+`droidloomctl install --notify %f`. The notification says "Android is
+starting." or, where Droidloom was never set up, "Setting up Android
+first: enter your password when asked." (polkit's agent asks), then
+"Installing the app.", and ends with "Installed NAME", "Updated NAME" or
+"Installed FILE" (no launcher entry changed) for 10 seconds, or with
+"Could not install FILE" and the reason until it is dismissed. The texts
+are English, as all of Droidloom's.
+
+Which application opens APK files by default is the desktop's choice: the
+erhai distribution names this entry in `denial-mimeapps.list` (package
+`erhai-denial`). `desktop-file-validate` 0.28 accepts the entry.
 
 ### 0.1.0-49+eb2
 
@@ -293,6 +315,34 @@ from `cb9abafe1abacdf3bacb8e687c0632d0eae992d0` (`eb4`'s programs +
 
 It installs with `droidloom-image` and `droidloom-base` `0.1.0-49+eb1`. Not
 yet run on a device.
+
+### 0.1.0-49+eb6
+
+`droidloom-runtime_0.1.0-49+eb6_arm64.deb`, 23.11.2026, SHA-256
+`f08d5c191e5cde565c2e9b4c3fea09448c5ad83126a818841f748e8a4ccd00af`: programs
+from `2822b9c576928967e515147f2ce182fea3a02a40` (`eb5`'s programs +
+`4c651ec` + `1019dad`; `2822b9c` adds the desktop entry and changes the
+package texts). Against `0.1.0-49+eb5`:
+
+- 645 entries instead of 643: `/usr/share/applications/` and
+  `droidloom-install-apk.desktop` (644, root); every other entry has the
+  same mode and owner;
+- the same five programs differ as from `eb4` to `eb5`, the ones built with
+  the supervisor's library: `droidloomd`, `droidloomctl`,
+  `droidloom-supervisor`, `droidloom-applications`,
+  `droidloom-package-helper`; the other five are the same files;
+- `README.Debian`, `copyright`, `changelog.Debian.gz`, `control` (version,
+  size, commit, description) and `md5sums` differ; `postinst`, `prerm`,
+  `postrm`, `triggers` and `Depends` are the same.
+
+`eb-build-debs` verified it ("386 files and links identical to
+droidloom-runtime upstream, 10 replaced …, 2 added by this packaging").
+Under qemu `droidloomctl install --help` shows `--notify`; an install of a
+file that is no APK is refused before anything starts, and on a machine
+without Droidloom an install of an APK tries the start and ends with
+"start failed; see journalctl --user -u droidloom.service". It installs
+with `droidloom-image` and `droidloom-base` `0.1.0-49+eb1`. Not yet run on
+a device.
 
 ## Another upstream release
 
