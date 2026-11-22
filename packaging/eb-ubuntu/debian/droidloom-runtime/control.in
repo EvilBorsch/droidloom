@@ -20,4 +20,6 @@ Description: Android apps in native Wayland windows (Droidloom runtime)
  of https://github.com/EvilBorsch/droidloom, which is upstream release
  @PKGVER@-@PKGREL@ (commit @COMMIT@)
  with fixes for Debian and Ubuntu. All other files are repacked unchanged
- from the upstream Arch Linux ARM package droidloom-runtime @PKGVER@-@PKGREL@.
+ from the upstream Arch Linux ARM package droidloom-runtime @PKGVER@-@PKGREL@,
+ and a udev rule is added that keeps Android's loop devices out of file
+ managers (UDISKS_IGNORE).

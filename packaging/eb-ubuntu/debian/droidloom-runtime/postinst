@@ -3,12 +3,21 @@
 # droidloom-base changed (file triggers): reload systemd and let the helper
 # refresh an existing setup. Upstream (pacman): 90-droidloom-installed.hook,
 # PostTransaction. Droidloom stays stopped; the first `droidloomctl start`
-# does the per-user setup through pkexec.
+# does the per-user setup through pkexec. Ours alone: udev reads the rule
+# this packaging adds.
 set -e
 case "$1" in
 configure|triggered)
 	if [ -d /run/systemd/system ]; then
 		systemctl daemon-reload
+	fi
+	# 60-droidloom-loop.rules is new or changed: have a running udev read it
+	# and apply it to the loop devices of an Android that is running. Without
+	# udev (a chroot during an image build) there is nothing to do, and a
+	# udev that cannot be reached must not fail the installation.
+	if [ "$1" = configure ] && [ -d /run/udev ] && command -v udevadm >/dev/null 2>&1; then
+		udevadm control --reload || true
+		udevadm trigger --subsystem-match=block --sysname-match='loop*' --action=change || true
 	fi
 	/usr/lib/droidloom/droidloom-package-helper after-install
 	;;

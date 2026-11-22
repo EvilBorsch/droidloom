@@ -6,7 +6,7 @@ packages of one release (now release 49, `0.1.0-49`):
 
 | Package | Contents | Made from |
 |---|---|---|
-| `droidloom-runtime` | host programs, systemd units, polkit policy, cell template, notices | upstream's files, **programs built from this fork** |
+| `droidloom-runtime` | host programs, systemd units, polkit policy, cell template, notices | upstream's files, **programs built from this fork**, one udev rule of this packaging |
 | `droidloom-image` | Android vendor image and framework overrides | upstream's package, files unchanged |
 | `droidloom-base` | AOSP `system`, `system_ext`, `product` images | upstream's package, files unchanged |
 
@@ -39,6 +39,7 @@ The tools below are on branch `eb/ubuntu-packaging`, which is based on
 | `tools/eb-build-debs` | makes the three packages |
 | `packaging/eb-ubuntu/upstream.lock` | upstream release, source commit, SHA-256 of its archives |
 | `packaging/eb-ubuntu/debian/` | control templates, maintainer scripts, copyright, README.Debian |
+| `packaging/eb-ubuntu/debian/droidloom-runtime/added/` | files this packaging adds to upstream's, at their paths in the package |
 | `packaging/eb-ubuntu/check-archive.py` | archive checks used by `eb-build-debs` |
 
 ## Prerequisites
@@ -160,7 +161,8 @@ user (xattrs, hard links, devices, setuid, owners other than root), moves
 upstream's files into the package, replaces pacman's hooks with maintainer
 scripts, and checks the resulting `.deb` file by file against upstream's
 `.MTREE` (SHA-256, mode, link target; nothing extra but `copyright`,
-`changelog.Debian.gz` and `README.Debian`). Files keep upstream's times,
+`changelog.Debian.gz`, `README.Debian` and the files of the package's
+`added/` tree, which the check names). Files keep upstream's times,
 clamped to upstream's build date, or for the runtime to the commit date of
 its programs, so a rebuild gives the same archive.
 
@@ -175,7 +177,13 @@ For `droidloom-runtime` it also:
   need (2.39 for release 49, as before) and checks that every library a
   program links comes from a package `Depends` names;
 - names the fork's commit and the commits since upstream's in the package
-  description, `changelog.Debian.gz`, `copyright` and `README.Debian`.
+  description, `changelog.Debian.gz`, `copyright` and `README.Debian`;
+- adds the files of `debian/droidloom-runtime/added/`, now
+  `/usr/lib/udev/rules.d/60-droidloom-loop.rules` (below), with mode 644. A
+  file at a path upstream ships is refused. `check-archive.py verify
+  --added` requires exactly these files with exactly this content beside
+  upstream's, and its result ends with "1 added by this packaging:
+  /usr/lib/udev/rules.d/60-droidloom-loop.rules".
 
 Maintainer scripts:
 
@@ -184,6 +192,7 @@ Maintainer scripts:
 | `60-droidloom-upgrade.hook` | runtime `prerm upgrade`; image and base `preinst upgrade` | `droidloom-package-helper before-upgrade`: stop Droidloom or abort |
 | `60-droidloom-remove.hook` | runtime `prerm remove` | `before-remove`: stop, remove launchers, polkit rule, `runtime.env` |
 | `90-droidloom-installed.hook` | runtime `postinst configure` and file triggers on `/usr/lib/droidloom/{images,runtime,storage}` | `daemon-reload`, `after-install` |
+| — | runtime `postinst configure` | when udev runs (`/run/udev`): `udevadm control --reload` and `udevadm trigger --subsystem-match=block --sysname-match='loop*' --action=change`, so the loop rule applies to a running Android; their failures are ignored, and without udev (a chroot during an image build) nothing is run |
 | — | runtime `postrm purge` | remove `/etc/droidloom/*`; Android's data in `/var/lib/droidloom` is never removed |
 
 Checked on 22.11.2026: `tools/eb-build-debs eb1 droidloom-image` reproduces
@@ -191,6 +200,31 @@ Checked on 22.11.2026: `tools/eb-build-debs eb1 droidloom-image` reproduces
 the fork, byte for byte (SHA-256 `49a4985b…`), and the recipe as first
 imported (commit `78f23ce`) reproduced `droidloom-runtime_0.1.0-49+eb1`
 byte for byte (`640a2824…`).
+
+### The loop-device rule
+
+Android's system images and APEX packages are mounted through loop devices.
+On the tablet a running Android had 49 of them, udisks offered each as a
+volume, and the file manager's sidebar filled with "959 MB Volume", "30 MB
+Volume" and so on. `60-droidloom-loop.rules` sets `UDISKS_IGNORE=1` on a loop
+device whose `loop/backing_file` is one of:
+
+| Pattern | What is mounted from there | Known from |
+|---|---|---|
+| `/usr/lib/droidloom/*` | the images of `droidloom-image` and `droidloom-base`, the GApps add-on | seen on the tablet |
+| `/system/apex/*`, `/system_ext/apex/*`, `/vendor/apex/*`, `/product/apex/*`, `/apex/*`, `/data/apex/*` | APEX packages, by apexd in the cell; the path is the one in the cell's mount namespace | seen on the tablet |
+| `/var/lib/droidloom/*` | the images of a source installation (`/var/lib/droidloom/images/current`, `packaging/cell-spec-arm64.json`) and the old storage images `data.img` and `metadata.img`, which `migrate-storage` mounts with `-o loop` (`storage_migration.rs`) | the fork's source |
+| `/data/app-staging/*` | an APEX update that apexd mounts to check it before staging it | AOSP's apexd; not seen here |
+
+With the first two rows, in `/etc/udev/rules.d` on the tablet, the volumes
+offered went from 49 to 0, all 49 loop devices got the mark and snapd's loop
+device stayed untouched. The rule as shipped was checked with udev 259 on
+the build machine (`udevadm verify`, then loaded from `/run/udev/rules.d`):
+a loop device on a file below `/var/lib/droidloom` gets the mark, one on a
+file in `/tmp` does not, and a device loses the mark when it is detached or
+set up for another file. Nothing else tells these devices apart for udev:
+the mark goes by the path alone, so a loop device a person sets up on a file
+below one of these paths is hidden from file managers too.
 
 ### 0.1.0-49+eb2
 
