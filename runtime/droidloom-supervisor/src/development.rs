@@ -380,14 +380,19 @@ impl DevelopmentCell {
             .map_err(|source| io_error("poll Android namespace process before stopping", source))?
             .is_none()
         {
-            // Android PID 1 shuts down on SIGTERM, and `unshare --fork`
-            // exits once it has, so the wait below covers Android's own
-            // shutdown. Signal it directly: `unshare --forward-signals`,
-            // which would pass the owner's SIGTERM on, needs util-linux
-            // 2.42, newer than Debian 13 and Ubuntu 26.04 ship. Before
-            // unshare has forked, the owner's own SIGTERM ends it and
-            // --kill-child=TERM passes the signal on.
-            if !signal_namespace_init(self.child.id(), libc::SIGTERM)? {
+            // Ask Android to power itself off, as its own power menu does:
+            // init stops its services, syncs, and its reboot call ends the
+            // PID namespace, so `unshare --fork` exits and the wait below
+            // sees a clean shutdown (about a third of a second on a tablet).
+            // SIGTERM does not do that: Android's init has CAP_SYS_BOOT here
+            // and so installs no SIGTERM handler, and the kernel drops a
+            // signal a namespace's init does not handle. Passing the owner's
+            // SIGTERM on with `unshare --forward-signals`, which also needs
+            // util-linux 2.42, only ran into the deadline below. Before
+            // Android's init runs there is nothing to ask: end the owner,
+            // whose --kill-child=TERM ends its child.
+            let asked = namespace_init(self.child.id()).is_some_and(request_android_power_off);
+            if !asked {
                 signal_process(self.child.id(), libc::SIGTERM)?;
             }
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -585,54 +590,21 @@ fn namespace_init(owner: u32) -> Option<u32> {
         .find(|&pid| parent_pid(pid) == Some(owner))
 }
 
-/// Sends `signal` to the namespace's PID 1 through a pidfd, so a PID reused
-/// after the lookup is never signalled. False when the owner has no child.
-fn signal_namespace_init(owner: u32, signal: libc::c_int) -> Result<bool, DevelopmentError> {
-    let Some(init) = namespace_init(owner) else {
-        return Ok(false);
-    };
-    let pid = i32::try_from(init).map_err(|_| {
-        DevelopmentError::InvalidInput("Android init PID exceeds Linux pid_t".into())
-    })?;
-    // SAFETY: pidfd_open takes scalar arguments and returns a fresh descriptor.
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    if fd < 0 {
-        let error = io::Error::last_os_error();
-        return if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(false)
-        } else {
-            Err(io_error("open Android init", error))
-        };
-    }
-    let fd = i32::try_from(fd)
-        .map_err(|_| DevelopmentError::InvalidInput("pidfd exceeds a file descriptor".into()))?;
-    // SAFETY: successful pidfd_open transferred ownership of this descriptor.
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    // The descriptor names the process that had the PID when it was opened:
-    // it is the namespace's PID 1 only if the owner is still its parent.
-    if parent_pid(init) != Some(owner) {
-        return Ok(false);
-    }
-    // SAFETY: a valid pidfd, a signal number and no siginfo.
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            fd.as_raw_fd(),
-            signal,
-            std::ptr::null::<libc::siginfo_t>(),
-            0,
-        )
-    };
-    if result == 0 {
-        Ok(true)
-    } else {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(false)
-        } else {
-            Err(io_error("signal Android init", error))
-        }
-    }
+/// Asks Android's init, host PID `init`, to shut Android down and power off;
+/// false when the request could not be made.
+fn request_android_power_off(init: u32) -> bool {
+    droidloom_cpu_placement::command("/usr/bin/timeout")
+        .args(["--kill-after=1s", "5s", "/usr/bin/nsenter", "--target"])
+        .arg(init.to_string())
+        .args([
+            "--mount", "--uts", "--ipc", "--net", "--pid", "--cgroup", "--root", "--wd", "--",
+            "/system/bin/setprop", "sys.powerctl", "shutdown",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn signal_process(pid: u32, signal: libc::c_int) -> Result<(), DevelopmentError> {

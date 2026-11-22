@@ -16,7 +16,7 @@ use std::process::Stdio;
 
 use crate::CellSpec;
 use crate::development::DevelopmentError;
-use crate::dhcp_responder::{DhcpResponder, Lease};
+use crate::dhcp_responder::{DhcpResponder, Lease, Resolvers};
 
 const HOST_IPV4_CIDR: &str = "10.177.0.1/30";
 const CELL_IPV4_CIDR: &str = "10.177.0.2/32";
@@ -24,14 +24,55 @@ const CELL_INTERFACE: &str = "wlan0";
 // Locally administered, so it never names real hardware. Android keeps one
 // address for its Wi-Fi interface across cell starts.
 const CELL_MAC: &str = "02:64:6c:00:00:02";
-// The lease DHCP gives the cell: the address above, the host as its gateway,
-// public resolvers so the cell does not depend on the host's resolver.
-const LEASE: Lease = Lease {
-    server: Ipv4Addr::new(10, 177, 0, 1),
-    client: Ipv4Addr::new(10, 177, 0, 2),
-    prefix_len: 30,
-    dns: [Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
-};
+const LEASE_SERVER: Ipv4Addr = Ipv4Addr::new(10, 177, 0, 1);
+const LEASE_CLIENT: Ipv4Addr = Ipv4Addr::new(10, 177, 0, 2);
+const LEASE_PREFIX_LEN: u8 = 30;
+// Resolvers every network should reach. The cell does not use the host's own
+// resolver process, so it does not depend on one.
+const PUBLIC_RESOLVERS: [Ipv4Addr; 2] = [Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)];
+// Where the host's network names its resolvers: systemd-resolved's list of
+// the servers it forwards to, then the classic file.
+const HOST_RESOLVER_FILES: [&str; 2] = ["/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"];
+
+/// The lease DHCP gives the cell: its address, the host as its gateway, and
+/// resolvers: those the host's network gave the host, then the public ones.
+/// Some networks answer DNS only from their own resolvers and drop queries
+/// to 1.1.1.1 and 8.8.8.8. Android then fails its first Internet check,
+/// before its encrypted DNS is up, marks the network as without Internet
+/// for good and no longer joins it by itself.
+fn lease() -> Lease {
+    let host = HOST_RESOLVER_FILES
+        .iter()
+        .find_map(|path| {
+            let servers = host_resolvers(&fs::read_to_string(path).ok()?);
+            (!servers.is_empty()).then_some(servers)
+        })
+        .unwrap_or_default();
+    let mut servers = host.into_iter().take(2).chain(PUBLIC_RESOLVERS);
+    let first = servers.next().unwrap_or(PUBLIC_RESOLVERS[0]);
+    Lease {
+        server: LEASE_SERVER,
+        client: LEASE_CLIENT,
+        prefix_len: LEASE_PREFIX_LEN,
+        dns: Resolvers::new(first, servers),
+    }
+}
+
+/// The IPv4 resolvers a resolv.conf names that the cell can reach through
+/// the host: not the host's own stub on a loopback address.
+fn host_resolvers(resolv_conf: &str) -> Vec<Ipv4Addr> {
+    resolv_conf
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next() == Some("nameserver")).then(|| words.next())?
+        })
+        .filter_map(|server| server.parse::<Ipv4Addr>().ok())
+        .filter(|server| {
+            !server.is_loopback() && !server.is_unspecified() && !server.is_link_local()
+        })
+        .collect()
+}
 const IPV4_FORWARD_PATH: &str = "/proc/sys/net/ipv4/ip_forward";
 const IPV4_FORWARD_STATE_FILE: &str = "host-ipv4-forward.before";
 const NETNS_DIR: &str = "/run/netns";
@@ -104,7 +145,7 @@ impl DevelopmentNetwork {
     fn setup(&mut self) -> Result<(), DevelopmentError> {
         self.setup_links()?;
         self.dhcp = Some(
-            DhcpResponder::start(&self.names.host_interface, LEASE)
+            DhcpResponder::start(&self.names.host_interface, lease())
                 .map_err(|source| io_error("answer DHCP on the cell link", source))?,
         );
         self.enable_forwarding()?;
@@ -493,9 +534,33 @@ mod tests {
         assert_eq!(CELL_IPV4_CIDR, "10.177.0.2/32");
         // DHCP hands out exactly the address the firewall rules name.
         assert_eq!(
-            format!("{}/{}", LEASE.server, LEASE.prefix_len),
+            format!("{LEASE_SERVER}/{LEASE_PREFIX_LEN}"),
             HOST_IPV4_CIDR
         );
-        assert_eq!(format!("{}/32", LEASE.client), CELL_IPV4_CIDR);
+        assert_eq!(format!("{LEASE_CLIENT}/32"), CELL_IPV4_CIDR);
+    }
+
+    #[test]
+    fn host_resolvers_are_the_ipv4_servers_the_cell_can_reach() {
+        let conf = "# made by a resolver\nnameserver 127.0.0.53\noptions edns0\n\
+                    nameserver 192.168.0.1\nnameserver fe80::1%wlan0\n\
+                    nameserver 217.10.39.4 # comment\nnameserver 0.0.0.0\nnameserver\n";
+        assert_eq!(
+            host_resolvers(conf),
+            [Ipv4Addr::new(192, 168, 0, 1), Ipv4Addr::new(217, 10, 39, 4)]
+        );
+        assert!(host_resolvers("nameserver 127.0.0.53\n").is_empty());
+    }
+
+    #[test]
+    fn a_lease_lists_each_resolver_once_and_at_most_four() {
+        let public = PUBLIC_RESOLVERS;
+        let resolvers = Resolvers::new(public[0], [public[1], public[0], public[1]]);
+        assert_eq!(resolvers.as_slice(), public);
+        let many = Resolvers::new(
+            Ipv4Addr::new(10, 0, 0, 1),
+            (2..9).map(|n| Ipv4Addr::new(10, 0, 0, n)),
+        );
+        assert_eq!(many.as_slice().len(), Resolvers::MAX);
     }
 }
