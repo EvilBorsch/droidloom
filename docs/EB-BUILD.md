@@ -25,6 +25,16 @@ Upstream's release 49 does not work on Ubuntu 26.04 as built:
   13) rejects, so Android never starts (`5380af3`, branch
   `eb/unshare-util-linux-2.41`, which contains `201000a`).
 
+Later changes of the fork's programs, in the package since the revision
+named:
+
+| Since | Change | Commit |
+|---|---|---|
+| `eb3` | the host's resolvers in the lease; Android is stopped by powering it off | `2712d37` |
+| `eb4` | `droidloomctl launch`, which the exported desktop entries run, starts a stopped Droidloom as `droidloomctl start` does and then launches; it does not enable the user service (`docs/desktop-integration.md`) | `e20c4cb` |
+| `eb4` | the desktop entries of Android's own applications (`com.android.*`) are named "Settings (Android)", "Files (Android)" | `1805815` |
+| `eb4` | not a program: the udev rule `60-droidloom-loop.rules` and its `postinst` lines ([below](#the-loop-device-rule)) | `8f37ec6` |
+
 Android itself (`droidloom-image`, `droidloom-base`) is not changed, so it is
 not rebuilt: that is an AOSP build of tens of gigabytes and hours
 (`docs/BUILDING.md`).

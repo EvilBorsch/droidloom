@@ -20,6 +20,14 @@ which is upstream's release @PKGVER@-@PKGREL@, commit
 
 @HOST_CHANGES@
 
+Two of them change what a person sees. An application launched while
+Droidloom is stopped (a launcher icon, or droidloomctl launch) starts
+Droidloom as droidloomctl start does, waits for Android and then opens; this
+does not enable droidloom.service for the next session. The launcher entries
+of Android's own applications (packages com.android.*) are named with
+"(Android)" after Android's label, "Settings (Android)", so they are not
+taken for the host's Settings and Files.
+
 One file is this packaging's own, not upstream's:
 /usr/lib/udev/rules.d/60-droidloom-loop.rules. Android's system images and
 APEX packages are mounted through loop devices, about fifty of them, and
@@ -50,7 +58,8 @@ It asks for administrator authentication once (pkexec) to write
     droidloomctl install /path/to/app.apk
     droidloomctl stop
 
-To start Android with every graphical session:
+A launch starts a stopped Droidloom by itself; that takes as long as
+droidloomctl start. To start Android with every graphical session:
     systemctl --user enable droidloom.service
 
 Removing the packages keeps /etc/droidloom/cell.json and Android's data;
