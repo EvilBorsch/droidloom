@@ -26,6 +26,14 @@ Compositor sizes take precedence; restart preserves the mode. `window-mode`
 supports per-app preferences. Android's privileged task-resize API updates task
 configuration and crop. See [insets and resizing](contracts/navigation-insets.md).
 
+Android's own applications carry the names of the host's: both have Settings
+and Files. The entries of the platform's packages (`com.android.*`, without
+Google's Chrome and Play Store, which a person installs) are therefore named
+"Settings (Android)", "Files (Android)"; the list Android sends does not say
+which packages belong to its system image. Installed applications keep
+Android's label. Entries written before are renamed at the next catalog
+refresh.
+
 Windows ask the compositor for its titlebar through xdg-decoration; a compositor
 without it leaves them undecorated. The title is the app's launcher name and the
 app id its package, which window rules and `StartupWMClass` match.
