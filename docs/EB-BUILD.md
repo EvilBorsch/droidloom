@@ -34,6 +34,7 @@ named:
 | `eb4` | `droidloomctl launch`, which the exported desktop entries run, starts a stopped Droidloom as `droidloomctl start` does and then launches; it does not enable the user service (`docs/desktop-integration.md`) | `e20c4cb` |
 | `eb4` | the desktop entries of Android's own applications (`com.android.*`) are named "Settings (Android)", "Files (Android)" | `1805815` |
 | `eb4` | not a program: the udev rule `60-droidloom-loop.rules` and its `postinst` lines ([below](#the-loop-device-rule)) | `8f37ec6` |
+| `eb5` | Android counts as ready once ActivityManager has user 0 in `RUNNING_UNLOCKED`, not already at `sys.boot_completed`; Files (Android), launched right after a start, failed with "Activity start failed: -92" (`docs/contracts/runtime-layout-v1.md`, "Lifecycle readiness") | `a856d4d` |
 
 Android itself (`droidloom-image`, `droidloom-base`) is not changed, so it is
 not rebuilt: that is an AOSP build of tens of gigabytes and hours
@@ -266,6 +267,29 @@ Against `0.1.0-49+eb3`:
 - `README.Debian`, `copyright`, `changelog.Debian.gz`, `control` (version,
   size, commit, description), `md5sums` and `postinst` (the udev lines)
   differ; `prerm`, `postrm`, `triggers` and `Depends` are the same.
+
+It installs with `droidloom-image` and `droidloom-base` `0.1.0-49+eb1`. On
+the tablet a launch with Droidloom stopped started it (one start of the unit
+for two launches made at once), but Files (Android) launched that way failed
+3 of 3 with "Activity start failed: -92", and right after `droidloomctl
+start` it failed at +0.01 s and opened at +0.6 s; `eb5` fixes that.
+
+### 0.1.0-49+eb5
+
+`droidloom-runtime_0.1.0-49+eb5_arm64.deb`, 22.11.2026, SHA-256
+`5da8c23693ebfc90cc5b1bea02681c2bc99cc11b77d31559e15eefe1d2e9d37d`: programs
+from `cb9abafe1abacdf3bacb8e687c0632d0eae992d0` (`eb4`'s programs +
+`a856d4d`; `cb9abaf` changes the package texts only). Against
+`0.1.0-49+eb4`:
+
+- the same 643 entries with the same modes and owners;
+- the same five programs differ as from `eb3` to `eb4`, the ones built with
+  the supervisor's library: `droidloomd`, `droidloomctl`,
+  `droidloom-supervisor`, `droidloom-applications`,
+  `droidloom-package-helper`; the other five are the same files;
+- `README.Debian`, `copyright`, `changelog.Debian.gz`, `control` (version,
+  size, commit, description) and `md5sums` differ; `postinst`, `prerm`,
+  `postrm`, `triggers` and `Depends` are the same.
 
 It installs with `droidloom-image` and `droidloom-base` `0.1.0-49+eb1`. Not
 yet run on a device.
