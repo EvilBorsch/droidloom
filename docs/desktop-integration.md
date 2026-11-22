@@ -3,9 +3,17 @@
 ## Windows
 
 `droidloomctl start` and `droidloomctl stop` control the complete runtime. Startup
-is manual. The catalog exports Android launcher activities, labels and icons as
-XDG desktop applications. `droidloomctl applications` lists the catalog; launches
-require a running cell.
+is manual or on demand. The catalog exports Android launcher activities, labels
+and icons as XDG desktop applications, and the entries stay while Droidloom is
+stopped. `droidloomctl applications` lists the catalog and requires a running
+cell. `droidloomctl launch`, which the entries run, starts a stopped runtime
+first: it does what `droidloomctl start` does (the same setup check, session
+mode, service start, boot notice and readiness wait, without enabling
+`droidloom.service`), then launches. Of several launches made at once, one
+starts the runtime and the others wait for it
+(`$XDG_RUNTIME_DIR/droidloom/launch-start.lock`). An explicit `--socket`,
+`--spec` or `--cell` addresses a daemon that is not the session's, and never
+starts anything.
 
 The catalog subscribes to framework package/user/locale events. It snapshots on
 connection and changes, fetches missing icons in batches, and blocks while idle.
@@ -17,6 +25,14 @@ and remembers app sizes. `droidloomctl start --mode mobile` fills current bounds
 Compositor sizes take precedence; restart preserves the mode. `window-mode`
 supports per-app preferences. Android's privileged task-resize API updates task
 configuration and crop. See [insets and resizing](contracts/navigation-insets.md).
+
+Android's own applications carry the names of the host's: both have Settings
+and Files. The entries of the platform's packages (`com.android.*`, without
+Google's Chrome and Play Store, which a person installs) are therefore named
+"Settings (Android)", "Files (Android)"; the list Android sends does not say
+which packages belong to its system image. Installed applications keep
+Android's label. Entries written before are renamed at the next catalog
+refresh.
 
 Windows ask the compositor for its titlebar through xdg-decoration; a compositor
 without it leaves them undecorated. The title is the app's launcher name and the

@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
@@ -24,6 +25,14 @@ const MANIFEST_SCHEMA: u32 = 1;
 const ICON_SIZE: u32 = 128;
 const MAX_ICON_BYTES: usize = 1024 * 1024;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+/// Android's own applications live in these packages. The list Android sends
+/// carries no other sign of belonging to its system image.
+const PLATFORM_PACKAGES: &str = "com.android.";
+/// Google's Chrome and Play Store use the platform's prefix, yet a person
+/// installs them.
+const INSTALLED_PACKAGES: [&str; 2] = ["com.android.chrome", "com.android.vending"];
+/// What a platform application's launcher name ends with.
+const PLATFORM_MARK: &str = " (Android)";
 
 /// User-owned paths used by the catalog reconciler.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -631,11 +640,26 @@ fn with_launch_resolution(desktop: String, resolution: &str) -> String {
     result
 }
 
+/// The name the launcher shows. Android's own Settings, Files or Contacts
+/// carry the names of the host's applications, and a launcher with two of a
+/// name does not tell them apart, so theirs end in "(Android)". What a person
+/// installed keeps Android's label.
+fn launcher_name(application: &AndroidApplication) -> Cow<'_, str> {
+    let label = application.name.trim_end();
+    let platform = application.package.starts_with(PLATFORM_PACKAGES)
+        && !INSTALLED_PACKAGES.contains(&application.package.as_str());
+    if platform && !label.ends_with(PLATFORM_MARK) {
+        Cow::Owned(format!("{label}{PLATFORM_MARK}"))
+    } else {
+        Cow::Borrowed(&application.name)
+    }
+}
+
 fn desktop_entry(application: &AndroidApplication, user: u32, icon: Option<&str>) -> String {
     let icon = icon.unwrap_or("application-x-executable");
     format!(
         "[Desktop Entry]\nType=Application\nVersion=1.0\nName={}\nComment=Android application via Droidloom\nTryExec=/usr/bin/droidloomctl\nExec=/usr/bin/droidloomctl launch {} --component {} --user {}\nIcon={}\nTerminal=false\nStartupNotify=true\nStartupWMClass={}\nX-Droidloom-Managed=true\nX-Droidloom-Package={}\nX-Droidloom-Component={}\nX-Droidloom-User={}\n",
-        escape_desktop_value(&application.name),
+        escape_desktop_value(&launcher_name(application)),
         application.package,
         application.component,
         user,
@@ -1082,6 +1106,119 @@ mod tests {
             "Exec=/usr/bin/droidloomctl launch org.mozilla.firefox --component org.mozilla.firefox/.App --user 0"
         ));
         assert!(!entry.contains("droidloomctl start"));
+    }
+
+    fn entry_name(name: &str, package: &str) -> String {
+        let component = format!("{package}/.Main");
+        let entry = desktop_entry(&application(name, package, &component, "one"), 0, None);
+        let names: Vec<_> = entry
+            .lines()
+            .filter_map(|line| line.strip_prefix("Name="))
+            .collect();
+        assert_eq!(names.len(), 1, "{entry}");
+        names[0].to_owned()
+    }
+
+    #[test]
+    fn androids_own_applications_are_marked_and_installed_ones_are_not() {
+        // The platform's applications share their names with the host's.
+        assert_eq!(
+            entry_name("Settings", "com.android.settings"),
+            "Settings (Android)"
+        );
+        assert_eq!(
+            entry_name("Files", "com.android.documentsui"),
+            "Files (Android)"
+        );
+        // Android's label in another language keeps its own words.
+        assert_eq!(
+            entry_name("Настройки", "com.android.settings"),
+            "Настройки (Android)"
+        );
+
+        // What a person installed keeps Android's label.
+        assert_eq!(entry_name("F-Droid", "org.fdroid.fdroid"), "F-Droid");
+        assert_eq!(entry_name("VLC", "org.videolan.vlc"), "VLC");
+        assert_eq!(entry_name("Settings", "org.example.settings"), "Settings");
+        // A longer first name than the platform's is another publisher's.
+        assert_eq!(entry_name("Files", "com.androidfiles.app"), "Files");
+        // Google's own, under the platform's prefix.
+        assert_eq!(entry_name("Chrome", "com.android.chrome"), "Chrome");
+        assert_eq!(
+            entry_name("Play Store", "com.android.vending"),
+            "Play Store"
+        );
+    }
+
+    #[test]
+    fn a_marked_label_is_not_marked_twice_and_stays_escaped() {
+        assert_eq!(
+            entry_name("Settings (Android)", "com.android.settings"),
+            "Settings (Android)"
+        );
+        assert_eq!(
+            entry_name("Settings (Android) ", "com.android.settings"),
+            "Settings (Android) "
+        );
+        // The mark follows the label, not the space Android left after it.
+        assert_eq!(
+            entry_name("Clock ", "com.android.deskclock"),
+            "Clock (Android)"
+        );
+        assert_eq!(
+            entry_name("Files\nand folders\\", "com.android.documentsui"),
+            "Files\\nand folders\\\\ (Android)"
+        );
+        // "Android" elsewhere in a label is not the mark.
+        assert_eq!(
+            entry_name("Android System WebView", "com.android.webview"),
+            "Android System WebView (Android)"
+        );
+    }
+
+    #[test]
+    fn an_entry_written_before_the_mark_is_rewritten_once() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = fixture_paths(temporary.path());
+        let settings = application(
+            "Settings",
+            "com.android.settings",
+            "com.android.settings/.Settings",
+            "one",
+        );
+        let firefox = application(
+            "Firefox",
+            "org.mozilla.firefox",
+            "org.mozilla.firefox/.App",
+            "one",
+        );
+        let mut source = FixtureSource {
+            user: 0,
+            applications: vec![settings.clone(), firefox],
+            icon_requests: 0,
+        };
+        assert_eq!(reconcile(&paths, &mut source).unwrap().launchers_updated, 2);
+
+        // The entry as the catalog wrote it before, with a kept resolution.
+        let path = paths.applications.join(format!(
+            "droidloom-{}.desktop",
+            application_id(0, &settings.component)
+        ));
+        let marked = fs::read_to_string(&path).unwrap();
+        assert!(marked.contains("Name=Settings (Android)\n"));
+        let unmarked = marked.replace("Name=Settings (Android)\n", "Name=Settings\n")
+            + "X-Droidloom-Resolution=1280x800\n";
+        fs::write(&path, unmarked).unwrap();
+
+        let refreshed = reconcile(&paths, &mut source).unwrap();
+        assert_eq!(refreshed.launchers_updated, 1);
+        assert_eq!(refreshed.icons_updated, 0);
+        assert_eq!(refreshed.entries_removed, 0);
+        let rewritten = fs::read_to_string(&path).unwrap();
+        assert_eq!(rewritten.matches("Name=").count(), 1);
+        assert!(rewritten.contains("Name=Settings (Android)\n"));
+        assert!(rewritten.contains("--user 0 --resolution 1280x800\n"));
+        assert!(!reconcile(&paths, &mut source).unwrap().changed());
     }
 
     #[test]

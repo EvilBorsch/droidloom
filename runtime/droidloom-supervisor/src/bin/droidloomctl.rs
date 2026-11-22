@@ -6,7 +6,7 @@ use std::{
     env, fs,
     io::Write,
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
@@ -14,8 +14,10 @@ use std::{
 use clap::{Parser, Subcommand, ValueEnum};
 use droidloom_supervisor::boot_notice::BootNotice;
 use droidloom_supervisor::control::{
-    ControlRequest, DEFAULT_CELL_SPEC, DEFAULT_CONTROL_SOCKET, request, request_with_progress,
+    ControlRequest, ControlResponse, DEFAULT_CELL_SPEC, DEFAULT_CONTROL_SOCKET, request,
+    request_with_progress,
 };
+use droidloom_supervisor::on_demand::{self, START_LOCK_TIMEOUT, StartLock};
 use droidloom_window_policy::{
     LogicalSize, SessionMode, WindowPolicyPaths, WindowPolicyStore, WindowPreference,
 };
@@ -223,7 +225,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             _ => None,
         };
         if let Some((operation, mode, no_wait)) = operation {
-            return session_lifecycle(operation, cli.json, mode, no_wait);
+            let message = session_lifecycle(operation, cli.json, mode, no_wait)?;
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": true, "message": message, "state": if operation == "stop" { "stopped" } else { "running" }})
+                );
+            } else {
+                println!("{message}");
+            }
+            return Ok(());
         }
         if matches!(cli.command, Command::Status) && !cli.socket.exists() {
             if cli.json {
@@ -249,6 +260,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::Dpi { dpi, .. } => Some(dpi),
         _ => None,
     };
+    // A desktop entry's launch starts a stopped Droidloom, as `start` does.
+    let start_on_demand = !cli.cell
+        && cli.socket == Path::new(DEFAULT_CONTROL_SOCKET)
+        && matches!(&cli.command, Command::Launch { spec, .. } if spec == Path::new(DEFAULT_CELL_SPEC));
     let wait_after_start = !cli.cell
         && matches!(
             cli.command,
@@ -388,6 +403,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             response?
+        } else if start_on_demand {
+            launch_starting_droidloom(cli.json, &control_request)?
         } else {
             request_with_progress(&cli.socket, &control_request, &mut report)?
         }
@@ -541,12 +558,74 @@ fn gpu(choice: Option<&droidloom_supervisor::host_gpu::GpuChoice>) -> Result<(),
     Ok(())
 }
 
+/// Launches an application, first starting Droidloom if it is stopped: the
+/// person stopped it, or has not started it in this session. The start is
+/// `droidloomctl start`'s, which keeps the session's window mode and does not
+/// enable the service; of several launches at once, one starts Droidloom.
+fn launch_starting_droidloom(
+    json: bool,
+    launch: &ControlRequest,
+) -> Result<ControlResponse, Box<dyn std::error::Error>> {
+    let report = |message: &str| {
+        if !json {
+            eprintln!("{message}");
+        }
+    };
+    on_demand::launch(
+        &mut || {
+            request_with_progress(Path::new(DEFAULT_CONTROL_SOCKET), launch, &mut |message| {
+                report(message);
+            })
+        },
+        &mut || {
+            if !Path::new(DEFAULT_CELL_SPEC).is_file() {
+                return Err(format!("Droidloom is not running, and it is not set up on this computer ({DEFAULT_CELL_SPEC} is missing). Run `droidloomctl start` in a terminal to set it up.").into());
+            }
+            report("Droidloom is not running; starting it for this launch...");
+            Ok(StartLock::acquire(
+                &session_directory()?,
+                START_LOCK_TIMEOUT,
+                &mut || report("Another launch is already starting Droidloom; waiting for it..."),
+            )?)
+        },
+        &mut || {
+            report(session_lifecycle("start", json, None, false)?);
+            Ok(())
+        },
+    )
+}
+
+/// The session's private Droidloom runtime directory, made if missing.
+fn session_directory() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let runtime =
+        PathBuf::from(env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR is missing")?);
+    if !runtime.is_absolute() {
+        return Err("XDG_RUNTIME_DIR must be absolute".into());
+    }
+    let directory = runtime.join("droidloom");
+    match fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(&directory)?;
+    if !metadata.is_dir() || metadata.uid() != fs::metadata(&runtime)?.uid() {
+        return Err("Droidloom runtime directory must be a session-owned directory".into());
+    }
+    // Older clients created this directory with the default 0755 mode.
+    // Keep the presenter's private-socket directory invariant on every start.
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    Ok(directory)
+}
+
+/// Starts, stops or restarts the session's Droidloom and returns what to
+/// tell the person about it.
 fn session_lifecycle(
     operation: &str,
     json: bool,
     requested_mode: Option<SessionMode>,
     no_wait: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<&'static str, Box<dyn std::error::Error>> {
     if operation != "stop" && PathBuf::from("/usr/share/droidloom/package.json").is_file() {
         let status =
             droidloom_cpu_placement::command("/usr/lib/droidloom/droidloom-package-helper")
@@ -564,24 +643,7 @@ fn session_lifecycle(
     }
     let mut operation = operation;
     if operation != "stop" {
-        let runtime =
-            PathBuf::from(env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR is missing")?);
-        if !runtime.is_absolute() {
-            return Err("XDG_RUNTIME_DIR must be absolute".into());
-        }
-        let directory = runtime.join("droidloom");
-        match fs::DirBuilder::new().mode(0o700).create(&directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-        let metadata = fs::symlink_metadata(&directory)?;
-        if !metadata.is_dir() || metadata.uid() != fs::metadata(&runtime)?.uid() {
-            return Err("Droidloom runtime directory must be a session-owned directory".into());
-        }
-        // Older clients created this directory with the default 0755 mode.
-        // Keep the presenter's private-socket directory invariant on every start.
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+        let directory = session_directory()?;
         let path = directory.join("session.env");
         let previous = match fs::read_to_string(&path) {
             Ok(value) => value
@@ -682,15 +744,7 @@ fn session_lifecycle(
         }
         "Droidloom is running; Android is ready"
     };
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({"ok": true, "message": message, "state": if operation == "stop" { "stopped" } else { "running" }})
-        );
-    } else {
-        println!("{message}");
-    }
-    Ok(())
+    Ok(message)
 }
 
 #[cfg(test)]

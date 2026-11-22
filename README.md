@@ -177,10 +177,10 @@ first-time setup and **[installing APKs](docs/INSTALL.md#5-install-an-apk)**.
 4. Try `droidloomctl launch com.android.settings`, then install your APKs with
    `droidloomctl install /path/to/application.apk`.
 
-Startup is manual; launching an app does not start a stopped runtime. Google
-apps are not included; an experimental
-[builder](docs/BUILDING.md#optional-google-apps) can add them from archives you
-supply.
+Startup is manual, or on demand: launching an app starts a stopped runtime
+first, without enabling it for later sessions. Google apps are not included;
+an experimental [builder](docs/BUILDING.md#optional-google-apps) can add them
+from archives you supply.
 
 ## Use Droidloom
 

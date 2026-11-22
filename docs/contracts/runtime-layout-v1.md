@@ -391,7 +391,13 @@ releases the cgroup. Repeating teardown must be safe.
 
 `running` means the namespace owner is alive. Android readiness additionally
 requires `sys.boot_completed=1`, `sys.droidloom.framework_ready=1`, the native
-framework RPC endpoint, and the task-control socket. Public `droidloomctl start`
+framework RPC endpoint, the task-control socket, and Android user 0 in
+`RUNNING_UNLOCKED` (`cmd activity get-started-user-state 0`, asked only once
+the others hold). Android sets `sys.boot_completed` before it unlocks its
+users, and user 0, which has the Droidloom credential, unlocks when the
+framework has verified it; until then PackageManager resolves direct-boot-aware components
+alone, so Settings would open and Files (DocumentsUI) would fail with
+`START_CLASS_NOT_FOUND`. Public `droidloomctl start`
 and `restart` wait for readiness; `--no-wait` and internal `--cell` orchestration
 retain service/cell-only startup. `droidloomctl wait` observes readiness without
 starting or restarting the cell. `status` reports the current observed stage.

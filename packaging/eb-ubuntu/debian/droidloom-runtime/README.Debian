@@ -20,8 +20,27 @@ which is upstream's release @PKGVER@-@PKGREL@, commit
 
 @HOST_CHANGES@
 
-The build recipe is docs/EB-BUILD.md in that repository (branch
-eb/ubuntu-packaging).
+Three of them change what a person sees. An application launched while
+Droidloom is stopped (a launcher icon, or droidloomctl launch) starts
+Droidloom as droidloomctl start does, waits for Android and then opens; this
+does not enable droidloom.service for the next session. The launcher entries
+of Android's own applications (packages com.android.*) are named with
+"(Android)" after Android's label, "Settings (Android)", so they are not
+taken for the host's Settings and Files. Android counts as ready only once
+its user 0 is unlocked: Android reports its boot completed a moment before
+that, and an application that is not direct-boot aware, such as Files
+(Android), launched in that moment failed with "Activity start failed: -92".
+
+One file is this packaging's own, not upstream's:
+/usr/lib/udev/rules.d/60-droidloom-loop.rules. Android's system images and
+APEX packages are mounted through loop devices, about fifty of them, and
+udisks offered each to file managers as a volume ("959 MB Volume"). The rule
+marks the loop devices whose file is Droidloom's or Android's with
+UDISKS_IGNORE=1; other loop devices are not touched. Installing the package
+makes a running udev read the rule and apply it to the loop devices there
+are.
+
+The build recipe is docs/EB-BUILD.md in that repository (branch eb/main).
 
 The kernel needs Binder with binderfs, EROFS with LZ4, policy routing and the
 other options listed in the research report (research/droidloom/README.md in
@@ -42,7 +61,8 @@ It asks for administrator authentication once (pkexec) to write
     droidloomctl install /path/to/app.apk
     droidloomctl stop
 
-To start Android with every graphical session:
+A launch starts a stopped Droidloom by itself; that takes as long as
+droidloomctl start. To start Android with every graphical session:
     systemctl --user enable droidloom.service
 
 Removing the packages keeps /etc/droidloom/cell.json and Android's data;

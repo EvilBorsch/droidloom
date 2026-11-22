@@ -19,5 +19,11 @@ Description: Android apps in native Wayland windows (Droidloom runtime)
  The programs are built from commit @HOST_COMMIT@
  of https://github.com/EvilBorsch/droidloom, which is upstream release
  @PKGVER@-@PKGREL@ (commit @COMMIT@)
- with fixes for Debian and Ubuntu. All other files are repacked unchanged
- from the upstream Arch Linux ARM package droidloom-runtime @PKGVER@-@PKGREL@.
+ with fixes for Debian and Ubuntu and two changes of behaviour: launching
+ an application starts a stopped Droidloom first, and the launcher entries
+ of Android's own applications are named "Settings (Android)". Android
+ counts as ready once its user is unlocked, so every application opens
+ right after a start. All other
+ files are repacked unchanged from the upstream Arch Linux ARM package
+ droidloom-runtime @PKGVER@-@PKGREL@, and a udev rule is added that keeps
+ Android's loop devices out of file managers (UDISKS_IGNORE).

@@ -1,0 +1,14 @@
+# Droidloom mounts Android's system images and APEX packages through loop
+# devices. They are the cell's own and nothing a person mounts: keep them out
+# of file managers and disk tools (udisks).
+#
+# loop/backing_file is the path as the kernel records it. The images the
+# supervisor mounts have a host path: /usr/lib/droidloom with the packages,
+# /var/lib/droidloom in a source installation and for the old storage images
+# (data.img, metadata.img) while migrate-storage copies them. The APEX
+# packages apexd mounts have a path inside the cell's mount namespace: the
+# partitions' apex directories, /data/apex for updated and decompressed
+# packages, /data/app-staging for an update being checked before it is staged.
+# A loop device set up again for another file loses the mark with the next
+# event.
+SUBSYSTEM=="block", KERNEL=="loop*", ATTR{loop/backing_file}=="/usr/lib/droidloom/*|/var/lib/droidloom/*|/system/apex/*|/system_ext/apex/*|/vendor/apex/*|/product/apex/*|/apex/*|/data/apex/*|/data/app-staging/*", ENV{UDISKS_IGNORE}="1"

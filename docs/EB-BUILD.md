@@ -6,7 +6,7 @@ packages of one release (now release 49, `0.1.0-49`):
 
 | Package | Contents | Made from |
 |---|---|---|
-| `droidloom-runtime` | host programs, systemd units, polkit policy, cell template, notices | upstream's files, **programs built from this fork** |
+| `droidloom-runtime` | host programs, systemd units, polkit policy, cell template, notices | upstream's files, **programs built from this fork**, one udev rule of this packaging |
 | `droidloom-image` | Android vendor image and framework overrides | upstream's package, files unchanged |
 | `droidloom-base` | AOSP `system`, `system_ext`, `product` images | upstream's package, files unchanged |
 
@@ -25,6 +25,17 @@ Upstream's release 49 does not work on Ubuntu 26.04 as built:
   13) rejects, so Android never starts (`5380af3`, branch
   `eb/unshare-util-linux-2.41`, which contains `201000a`).
 
+Later changes of the fork's programs, in the package since the revision
+named:
+
+| Since | Change | Commit |
+|---|---|---|
+| `eb3` | the host's resolvers in the lease; Android is stopped by powering it off | `2712d37` |
+| `eb4` | `droidloomctl launch`, which the exported desktop entries run, starts a stopped Droidloom as `droidloomctl start` does and then launches; it does not enable the user service (`docs/desktop-integration.md`) | `e20c4cb` |
+| `eb4` | the desktop entries of Android's own applications (`com.android.*`) are named "Settings (Android)", "Files (Android)" | `1805815` |
+| `eb4` | not a program: the udev rule `60-droidloom-loop.rules` and its `postinst` lines ([below](#the-loop-device-rule)) | `8f37ec6` |
+| `eb5` | Android counts as ready once ActivityManager has user 0 in `RUNNING_UNLOCKED`, not already at `sys.boot_completed`; Files (Android), launched right after a start, failed with "Activity start failed: -92" (`docs/contracts/runtime-layout-v1.md`, "Lifecycle readiness") | `a856d4d` |
+
 Android itself (`droidloom-image`, `droidloom-base`) is not changed, so it is
 not rebuilt: that is an AOSP build of tens of gigabytes and hours
 (`docs/BUILDING.md`).
@@ -39,6 +50,7 @@ The tools below are on branch `eb/ubuntu-packaging`, which is based on
 | `tools/eb-build-debs` | makes the three packages |
 | `packaging/eb-ubuntu/upstream.lock` | upstream release, source commit, SHA-256 of its archives |
 | `packaging/eb-ubuntu/debian/` | control templates, maintainer scripts, copyright, README.Debian |
+| `packaging/eb-ubuntu/debian/droidloom-runtime/added/` | files this packaging adds to upstream's, at their paths in the package |
 | `packaging/eb-ubuntu/check-archive.py` | archive checks used by `eb-build-debs` |
 
 ## Prerequisites
@@ -160,7 +172,8 @@ user (xattrs, hard links, devices, setuid, owners other than root), moves
 upstream's files into the package, replaces pacman's hooks with maintainer
 scripts, and checks the resulting `.deb` file by file against upstream's
 `.MTREE` (SHA-256, mode, link target; nothing extra but `copyright`,
-`changelog.Debian.gz` and `README.Debian`). Files keep upstream's times,
+`changelog.Debian.gz`, `README.Debian` and the files of the package's
+`added/` tree, which the check names). Files keep upstream's times,
 clamped to upstream's build date, or for the runtime to the commit date of
 its programs, so a rebuild gives the same archive.
 
@@ -175,7 +188,13 @@ For `droidloom-runtime` it also:
   need (2.39 for release 49, as before) and checks that every library a
   program links comes from a package `Depends` names;
 - names the fork's commit and the commits since upstream's in the package
-  description, `changelog.Debian.gz`, `copyright` and `README.Debian`.
+  description, `changelog.Debian.gz`, `copyright` and `README.Debian`;
+- adds the files of `debian/droidloom-runtime/added/`, now
+  `/usr/lib/udev/rules.d/60-droidloom-loop.rules` (below), with mode 644. A
+  file at a path upstream ships is refused. `check-archive.py verify
+  --added` requires exactly these files with exactly this content beside
+  upstream's, and its result ends with "1 added by this packaging:
+  /usr/lib/udev/rules.d/60-droidloom-loop.rules".
 
 Maintainer scripts:
 
@@ -184,6 +203,7 @@ Maintainer scripts:
 | `60-droidloom-upgrade.hook` | runtime `prerm upgrade`; image and base `preinst upgrade` | `droidloom-package-helper before-upgrade`: stop Droidloom or abort |
 | `60-droidloom-remove.hook` | runtime `prerm remove` | `before-remove`: stop, remove launchers, polkit rule, `runtime.env` |
 | `90-droidloom-installed.hook` | runtime `postinst configure` and file triggers on `/usr/lib/droidloom/{images,runtime,storage}` | `daemon-reload`, `after-install` |
+| — | runtime `postinst configure` | when udev runs (`/run/udev`): `udevadm control --reload` and `udevadm trigger --subsystem-match=block --sysname-match='loop*' --action=change`, so the loop rule applies to a running Android; their failures are ignored, and without udev (a chroot during an image build) nothing is run |
 | — | runtime `postrm purge` | remove `/etc/droidloom/*`; Android's data in `/var/lib/droidloom` is never removed |
 
 Checked on 22.11.2026: `tools/eb-build-debs eb1 droidloom-image` reproduces
@@ -191,6 +211,31 @@ Checked on 22.11.2026: `tools/eb-build-debs eb1 droidloom-image` reproduces
 the fork, byte for byte (SHA-256 `49a4985b…`), and the recipe as first
 imported (commit `78f23ce`) reproduced `droidloom-runtime_0.1.0-49+eb1`
 byte for byte (`640a2824…`).
+
+### The loop-device rule
+
+Android's system images and APEX packages are mounted through loop devices.
+On the tablet a running Android had 49 of them, udisks offered each as a
+volume, and the file manager's sidebar filled with "959 MB Volume", "30 MB
+Volume" and so on. `60-droidloom-loop.rules` sets `UDISKS_IGNORE=1` on a loop
+device whose `loop/backing_file` is one of:
+
+| Pattern | What is mounted from there | Known from |
+|---|---|---|
+| `/usr/lib/droidloom/*` | the images of `droidloom-image` and `droidloom-base`, the GApps add-on | seen on the tablet |
+| `/system/apex/*`, `/system_ext/apex/*`, `/vendor/apex/*`, `/product/apex/*`, `/apex/*`, `/data/apex/*` | APEX packages, by apexd in the cell; the path is the one in the cell's mount namespace | seen on the tablet |
+| `/var/lib/droidloom/*` | the images of a source installation (`/var/lib/droidloom/images/current`, `packaging/cell-spec-arm64.json`) and the old storage images `data.img` and `metadata.img`, which `migrate-storage` mounts with `-o loop` (`storage_migration.rs`) | the fork's source |
+| `/data/app-staging/*` | an APEX update that apexd mounts to check it before staging it | AOSP's apexd; not seen here |
+
+With the first two rows, in `/etc/udev/rules.d` on the tablet, the volumes
+offered went from 49 to 0, all 49 loop devices got the mark and snapd's loop
+device stayed untouched. The rule as shipped was checked with udev 259 on
+the build machine (`udevadm verify`, then loaded from `/run/udev/rules.d`):
+a loop device on a file below `/var/lib/droidloom` gets the mark, one on a
+file in `/tmp` does not, and a device loses the mark when it is detached or
+set up for another file. Nothing else tells these devices apart for udev:
+the mark goes by the path alone, so a loop device a person sets up on a file
+below one of these paths is hidden from file managers too.
 
 ### 0.1.0-49+eb2
 
@@ -202,6 +247,52 @@ same maintainer scripts and `Depends`; only the ten programs, `control`,
 `md5sums`, `copyright`, `changelog.Debian.gz` and `README.Debian` differ. It
 installs with `droidloom-image` and `droidloom-base` `0.1.0-49+eb1`. Not yet
 run on a device.
+
+### 0.1.0-49+eb4
+
+`droidloom-runtime_0.1.0-49+eb4_arm64.deb`, 22.11.2026, SHA-256
+`62517e257e4033d9d6e1beb125b63f612fe3ae8c18e6ca82465b8eeb9ec4b484`: programs
+from `9add222f805912b2d28a9c29258920d1419b5428` (`eb3`'s `2712d37` +
+`e20c4cb` + `1805815`; `8f37ec6` and `9add222` change no program source, and
+the programs built from `1805815` and from `9add222` are bit-identical).
+Against `0.1.0-49+eb3`:
+
+- 643 entries instead of 640: `/usr/lib/udev/`, `/usr/lib/udev/rules.d/` and
+  `60-droidloom-loop.rules` (644, root); every other entry has the same mode
+  and owner;
+- five programs differ, the ones built with the supervisor's library or the
+  catalog: `droidloomd`, `droidloomctl`, `droidloom-supervisor`,
+  `droidloom-applications`, `droidloom-package-helper`; the other five are
+  the same files;
+- `README.Debian`, `copyright`, `changelog.Debian.gz`, `control` (version,
+  size, commit, description), `md5sums` and `postinst` (the udev lines)
+  differ; `prerm`, `postrm`, `triggers` and `Depends` are the same.
+
+It installs with `droidloom-image` and `droidloom-base` `0.1.0-49+eb1`. On
+the tablet a launch with Droidloom stopped started it (one start of the unit
+for two launches made at once), but Files (Android) launched that way failed
+3 of 3 with "Activity start failed: -92", and right after `droidloomctl
+start` it failed at +0.01 s and opened at +0.6 s; `eb5` fixes that.
+
+### 0.1.0-49+eb5
+
+`droidloom-runtime_0.1.0-49+eb5_arm64.deb`, 22.11.2026, SHA-256
+`5da8c23693ebfc90cc5b1bea02681c2bc99cc11b77d31559e15eefe1d2e9d37d`: programs
+from `cb9abafe1abacdf3bacb8e687c0632d0eae992d0` (`eb4`'s programs +
+`a856d4d`; `cb9abaf` changes the package texts only). Against
+`0.1.0-49+eb4`:
+
+- the same 643 entries with the same modes and owners;
+- the same five programs differ as from `eb3` to `eb4`, the ones built with
+  the supervisor's library: `droidloomd`, `droidloomctl`,
+  `droidloom-supervisor`, `droidloom-applications`,
+  `droidloom-package-helper`; the other five are the same files;
+- `README.Debian`, `copyright`, `changelog.Debian.gz`, `control` (version,
+  size, commit, description) and `md5sums` differ; `postinst`, `prerm`,
+  `postrm`, `triggers` and `Depends` are the same.
+
+It installs with `droidloom-image` and `droidloom-base` `0.1.0-49+eb1`. Not
+yet run on a device.
 
 ## Another upstream release
 

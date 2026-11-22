@@ -1346,6 +1346,21 @@ pub fn request_with_progress(
     progress::request(socket, request, None, Some(report))
 }
 
+/// Whether a request failed because no daemon listens on its socket: the
+/// socket is missing, or a daemon that died left it behind.
+#[must_use]
+pub fn daemon_absent(error: &ControlError) -> bool {
+    matches!(
+        error,
+        ControlError::Io { context, source }
+            if context == progress::CONNECT
+                && matches!(
+                    source.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                )
+    )
+}
+
 /// Install a standalone APK opened with the calling user's permissions.
 ///
 /// # Errors
@@ -1756,13 +1771,86 @@ fn android_boot_snapshot(spec: &CellSpec) -> Result<(Option<u32>, Option<String>
     let control_ready =
         fs::symlink_metadata(task_control).is_ok_and(|metadata| metadata.file_type().is_socket());
     let properties = android_properties(pid)?;
-    Ok((
-        Some(pid),
-        properties.map_or_else(
-            || Some("waiting for Android's property service to respond".into()),
-            |properties| android_boot_phase(&properties, launcher.exists(), control_ready),
-        ),
-    ))
+    let phase = readiness_phase(
+        properties.as_deref(),
+        launcher.exists(),
+        control_ready,
+        || android_user_state(pid),
+    )?;
+    Ok((Some(pid), phase))
+}
+
+/// The first readiness gate Android has not passed yet; `None` once it passed
+/// them all. User 0's state comes last, as it costs one more process in the
+/// cell: only the moments between `sys.boot_completed` and the unlock, and
+/// `status`, ask for it.
+fn readiness_phase(
+    properties: Option<&[u8]>,
+    launcher: bool,
+    task_control: bool,
+    user_state: impl FnOnce() -> Result<Option<Vec<u8>>, ControlError>,
+) -> Result<Option<String>, ControlError> {
+    let Some(properties) = properties else {
+        return Ok(Some(
+            "waiting for Android's property service to respond".into(),
+        ));
+    };
+    if let Some(phase) = android_boot_phase(properties, launcher, task_control) {
+        return Ok(Some(phase));
+    }
+    Ok(android_user_phase(user_state()?.as_deref()))
+}
+
+/// Android sets `sys.boot_completed` before it unlocks its users, and
+/// Droidloom's user 0 has a credential that the framework verifies only once
+/// the user reached its locked boot and the lifecycle daemon gave the
+/// password. Until then `PackageManager` resolves direct-boot-aware components
+/// alone: Settings opens, Files (`DocumentsUI`) is "not found". Apps run as
+/// usual once `ActivityManager` has user 0 in `RUNNING_UNLOCKED`, the state in
+/// which it sends `ACTION_USER_UNLOCKED`.
+fn android_user_phase(state: Option<&[u8]>) -> Option<String> {
+    let state = state.map(String::from_utf8_lossy);
+    match state.as_deref().map(str::trim) {
+        Some("RUNNING_UNLOCKED") => None,
+        state => Some(format!(
+            "Android boot completed; waiting for Android user 0 to unlock ({})",
+            state
+                .filter(|state| matches!(
+                    *state,
+                    "BOOTING" | "RUNNING_LOCKED" | "RUNNING_UNLOCKING" | "STOPPING" | "SHUTDOWN"
+                ))
+                .unwrap_or("not reported")
+        )),
+    }
+}
+
+/// `ActivityManager`'s state of user 0, as `am get-started-user-state 0`
+/// prints it; `cmd` needs the `DUMP` permission, which root has.
+fn android_user_state(init_pid: u32) -> Result<Option<Vec<u8>>, ControlError> {
+    let pid = init_pid.to_string();
+    let output = droidloom_cpu_placement::command("timeout")
+        .args(["--kill-after=1s", "5s", "nsenter"])
+        .args([
+            "--target",
+            &pid,
+            "--mount",
+            "--uts",
+            "--ipc",
+            "--net",
+            "--pid",
+            "--cgroup",
+            "--root",
+            "--wd",
+            "--env",
+            "--",
+            "/system/bin/cmd",
+            "activity",
+            "get-started-user-state",
+            "0",
+        ])
+        .output()
+        .map_err(|source| io_error("read Android user 0's state", source))?;
+    Ok(output.status.success().then_some(output.stdout))
 }
 
 fn android_properties(init_pid: u32) -> Result<Option<Vec<u8>>, ControlError> {
@@ -2269,6 +2357,75 @@ mod tests {
                 .contains("task control")
         );
         assert!(android_boot_phase(ready, true, true).is_none());
+    }
+
+    #[test]
+    fn android_is_ready_only_once_user_0_is_unlocked() {
+        let booted = b"[sys.boot_completed]: [1]\n[sys.droidloom.framework_ready]: [1]\n";
+        let state = |text: &'static [u8]| move || Ok(Some(text.to_vec()));
+        // Everything Android reports at sys.boot_completed, while user 0 is
+        // still locked: PackageManager resolves direct-boot-aware components
+        // only, and Files (DocumentsUI) is not one.
+        let locked_states: [&[u8]; 3] = [b"BOOTING\n", b"RUNNING_LOCKED\n", b"RUNNING_UNLOCKING\n"];
+        for locked in locked_states {
+            let phase = readiness_phase(Some(booted), true, true, state(locked))
+                .unwrap()
+                .expect("a locked user is not ready");
+            let state = String::from_utf8_lossy(locked);
+            assert!(phase.contains("waiting for Android user 0 to unlock"));
+            assert!(phase.contains(state.trim()), "{phase}");
+        }
+        assert_eq!(
+            readiness_phase(Some(booted), true, true, state(b"RUNNING_UNLOCKED\n")).unwrap(),
+            None
+        );
+        // No answer, or one that is not a state, is not readiness either, and
+        // nothing Android printed reaches the person beyond a known state.
+        for unknown in [
+            None,
+            Some(b"User is not started: 0\n".to_vec()),
+            Some(b"RUNNING_UNLOCKED_SOON\n".to_vec()),
+            Some(Vec::new()),
+        ] {
+            let phase = readiness_phase(Some(booted), true, true, move || Ok(unknown))
+                .unwrap()
+                .unwrap();
+            assert!(phase.ends_with("(not reported)"), "{phase}");
+        }
+    }
+
+    #[test]
+    fn user_state_is_asked_only_after_every_other_gate() {
+        let asked = std::cell::Cell::new(0);
+        let state = || {
+            asked.set(asked.get() + 1);
+            Ok(Some(b"RUNNING_UNLOCKED\n".to_vec()))
+        };
+        let booted = b"[sys.boot_completed]: [1]\n[sys.droidloom.framework_ready]: [1]\n";
+        assert!(
+            readiness_phase(None, true, true, state)
+                .unwrap()
+                .unwrap()
+                .contains("property service")
+        );
+        let earlier: [(&[u8], bool, bool); 3] = [
+            (b"", true, true),
+            (booted, false, true),
+            (booted, true, false),
+        ];
+        for (properties, launcher, task_control) in earlier {
+            let phase = readiness_phase(Some(properties), launcher, task_control, state);
+            assert!(phase.unwrap().is_some());
+        }
+        assert_eq!(asked.get(), 0, "entering the cell again costs a process");
+        let phase = readiness_phase(Some(booted), true, true, state);
+        assert_eq!(phase.unwrap(), None);
+        assert_eq!(asked.get(), 1);
+        let error = readiness_phase(Some(booted), true, true, || {
+            Err(ControlError::Invalid("no nsenter".into()))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "no nsenter");
     }
 
     #[test]

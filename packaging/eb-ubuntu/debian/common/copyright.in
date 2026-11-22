@@ -12,6 +12,8 @@ Upstream-Contact: https://github.com/denialwm/droidloom
 @REBUILT@ https://github.com/EvilBorsch/droidloom commit
 @REBUILT@ @HOST_COMMIT@, upstream's commit
 @REBUILT@ @COMMIT@ with fixes for Debian and Ubuntu.
+@REBUILT@ /usr/lib/udev/rules.d/60-droidloom-loop.rules is that
+@REBUILT@ repository's too (packaging/eb-ubuntu), under the same license.
 @REBUILT@ All other files are the unchanged contents of the upstream Arch
 @REBUILT@ Linux ARM package @PACKAGE@ @PKGVER@-@PKGREL@. The complete license
 @REBUILT@ texts and notices shipped by upstream
