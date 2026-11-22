@@ -3,9 +3,17 @@
 ## Windows
 
 `droidloomctl start` and `droidloomctl stop` control the complete runtime. Startup
-is manual. The catalog exports Android launcher activities, labels and icons as
-XDG desktop applications. `droidloomctl applications` lists the catalog; launches
-require a running cell.
+is manual or on demand. The catalog exports Android launcher activities, labels
+and icons as XDG desktop applications, and the entries stay while Droidloom is
+stopped. `droidloomctl applications` lists the catalog and requires a running
+cell. `droidloomctl launch`, which the entries run, starts a stopped runtime
+first: it does what `droidloomctl start` does (the same setup check, session
+mode, service start, boot notice and readiness wait, without enabling
+`droidloom.service`), then launches. Of several launches made at once, one
+starts the runtime and the others wait for it
+(`$XDG_RUNTIME_DIR/droidloom/launch-start.lock`). An explicit `--socket`,
+`--spec` or `--cell` addresses a daemon that is not the session's, and never
+starts anything.
 
 The catalog subscribes to framework package/user/locale events. It snapshots on
 connection and changes, fetches missing icons in batches, and blocks while idle.

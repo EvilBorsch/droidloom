@@ -22,6 +22,7 @@ pub mod host_gpu;
 pub mod host_storage;
 mod identity;
 pub mod linux_plan;
+pub mod on_demand;
 mod package_cache;
 pub mod storage_backup;
 pub mod storage_migration;

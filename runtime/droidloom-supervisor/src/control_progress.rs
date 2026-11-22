@@ -15,6 +15,8 @@ use super::{
     io_error,
 };
 
+/// What a request was doing when no daemon could be reached.
+pub(super) const CONNECT: &str = "connect to droidloomd";
 pub(super) const LOG_HINT: &str = "Check the logs with:\n  journalctl -b -u droidloomd.service -n 200 --no-pager\n  journalctl --user -b -u droidloom.service -n 100 --no-pager";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(250);
 /// A backup or restore moves the whole storage, many gigabytes on a phone.
@@ -193,7 +195,7 @@ pub(super) fn request(
     progress: Option<&mut dyn FnMut(&str)>,
 ) -> Result<ControlResponse, ControlError> {
     let started = Instant::now();
-    let mut stream = connect(socket).map_err(|source| io_error("connect to droidloomd", source))?;
+    let mut stream = connect(socket).map_err(|source| io_error(CONNECT, source))?;
     stream
         .set_write_timeout(Some(Duration::from_secs(2)))
         .map_err(|e| io_error("set lifecycle request write timeout", e))?;

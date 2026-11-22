@@ -1346,6 +1346,21 @@ pub fn request_with_progress(
     progress::request(socket, request, None, Some(report))
 }
 
+/// Whether a request failed because no daemon listens on its socket: the
+/// socket is missing, or a daemon that died left it behind.
+#[must_use]
+pub fn daemon_absent(error: &ControlError) -> bool {
+    matches!(
+        error,
+        ControlError::Io { context, source }
+            if context == progress::CONNECT
+                && matches!(
+                    source.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                )
+    )
+}
+
 /// Install a standalone APK opened with the calling user's permissions.
 ///
 /// # Errors

@@ -318,8 +318,12 @@ droidloomctl stop
 droidloomctl start
 ```
 
-Startup is manual: app launch does not currently start a stopped runtime.
-Stopping releases the runtime's resources and closes its Android windows.
+Startup is manual or on demand: `droidloomctl launch`, which the exported
+desktop entries run, starts a stopped runtime as `droidloomctl start` does,
+waits for Android and then launches. It does not enable the user service, so
+a stopped runtime stays stopped in the next session until something is
+launched. Stopping releases the runtime's resources and closes its Android
+windows.
 
 To upgrade, install the new matching packages with the same `pacman -U`
 command, then run `droidloomctl start`. The transaction stops Droidloom and retains

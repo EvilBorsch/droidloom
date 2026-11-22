@@ -227,3 +227,82 @@ fn lifecycle_rejects_a_symlink_runtime_directory() {
     );
     assert!(!target.path().join("session.env").exists());
 }
+
+/// A `systemctl` that records its calls in the file named by `CALL_LOG`.
+fn recording_systemctl(directory: &std::path::Path) -> std::path::PathBuf {
+    let systemctl = directory.join("systemctl");
+    fs::write(
+        &systemctl,
+        "#!/bin/sh\nprintf '%s\n' \"$*\" >> \"$CALL_LOG\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    directory.join("calls")
+}
+
+#[test]
+fn launch_outside_the_session_service_never_starts_droidloom() {
+    if std::path::Path::new("/run/droidloom/control.sock").exists() {
+        // This host runs Droidloom; the default socket below would answer.
+        return;
+    }
+    // An explicit socket, the internal cell operation and another
+    // specification address a daemon that is not the session's to start.
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("missing.sock");
+    let log = recording_systemctl(directory.path());
+    for arguments in [
+        vec!["--socket", socket.to_str().unwrap()],
+        vec!["--cell"],
+        vec!["--spec", "/etc/droidloom/other.json"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_droidloomctl"))
+            .args(["launch", "org.example"])
+            .args(&arguments)
+            .env("PATH", directory.path())
+            .env("CALL_LOG", &log)
+            .env("XDG_RUNTIME_DIR", directory.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{arguments:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("connect to droidloomd"),
+            "{arguments:?}: {output:?}"
+        );
+        assert!(!log.exists(), "{arguments:?} called systemctl");
+        assert!(!directory.path().join("droidloom").exists());
+    }
+}
+
+#[test]
+fn launch_without_setup_says_so_and_starts_nothing() {
+    if std::path::Path::new("/run/droidloom/control.sock").exists()
+        || std::path::Path::new("/etc/droidloom/cell.json").exists()
+    {
+        // This host has Droidloom set up; the launch below would start it.
+        return;
+    }
+    for json in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let log = recording_systemctl(directory.path());
+        let mut command = Command::new(env!("CARGO_BIN_EXE_droidloomctl"));
+        command.args(["launch", "org.example", "--component", "org.example/.Main"]);
+        if json {
+            command.arg("--json");
+        }
+        let output = command
+            .env("PATH", directory.path())
+            .env("CALL_LOG", &log)
+            .env("XDG_RUNTIME_DIR", directory.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("Droidloom is not running"), "{stderr}");
+        assert!(stderr.contains("not set up"), "{stderr}");
+        assert!(stderr.contains("droidloomctl start"), "{stderr}");
+        assert!(output.stdout.is_empty());
+        assert!(!log.exists(), "systemctl was called");
+        assert!(!directory.path().join("droidloom").exists());
+    }
+}
