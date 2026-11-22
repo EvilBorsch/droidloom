@@ -307,14 +307,29 @@ fn prepare() -> Result<()> {
     eprintln!(
         "That system service needs root to create Android namespaces, mount the image files, and configure Droidloom's network connection."
     );
-    run(Command::new("/usr/bin/pkexec")
+    let status = Command::new("/usr/bin/pkexec")
         .arg(HELPER)
         .args(["setup", "--uid"])
         .arg(uid.to_string())
         .arg("--data-home")
         .arg(data_home)
         .arg("--state-home")
-        .arg(state_home))
+        .arg(state_home)
+        .status()?;
+    authenticated_setup(status.code())
+}
+/// What pkexec's status says of the setup it was asked to run. 126 and 127
+/// are pkexec's own (pkexec(1)): the authentication dialog was dismissed, or
+/// authorization was not obtained, which is also what happens without an
+/// authentication agent. Any other failure is the setup's, which said why.
+fn authenticated_setup(code: Option<i32>) -> Result<()> {
+    match code {
+        Some(0) => Ok(()),
+        Some(126) => Err("the administrator authentication was dismissed; Droidloom was not set up".into()),
+        Some(127) => Err("administrator authentication did not succeed (refused, or no authentication agent in this session); Droidloom was not set up".into()),
+        Some(code) => Err(format!("the setup ended with status {code}; Droidloom was not set up").into()),
+        None => Err("the setup was killed; Droidloom was not set up".into()),
+    }
 }
 fn setup(
     uid: u32,
@@ -623,6 +638,15 @@ mod tests {
         assert_eq!((&spec["graphics_backend"], &spec["gpu"]), (&json!("drm"), &json!("amd")));
         assert_eq!(chosen_gpu(Some(&spec)).unwrap(), amd);
         assert_eq!(chosen_gpu(None).unwrap(), GpuChoice::Auto);
+    }
+    #[test]
+    fn prepare_says_why_pkexec_ran_no_setup() {
+        assert!(authenticated_setup(Some(0)).is_ok());
+        let said = |code| authenticated_setup(code).unwrap_err().to_string();
+        assert!(said(Some(126)).contains("dismissed"));
+        assert!(said(Some(127)).contains("did not succeed"));
+        assert!(said(Some(1)).contains("status 1"));
+        assert!(said(None).contains("killed"));
     }
     #[test]
     fn setup_rejects_root_and_data_path_escape() {
