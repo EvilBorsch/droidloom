@@ -2,7 +2,7 @@
 //! on. `$XDG_CONFIG_HOME/droidloom/density-v1.json` gives dots per inch per
 //! unit of output scale: `dpiPerScale` for every output, and `outputs` by
 //! connector name (`DP-1`) for one. A task on an output of scale 1.5 with
-//! 230 per scale is laid out at 345 dpi, so its contents keep their size in
+//! 160 per scale is laid out at 240 dpi, so its contents keep their size in
 //! the output's logical units on every screen. Without the file, or without
 //! a value for the output, tasks take `DEFAULT_DPI_PER_SCALE`; a value out
 //! of Android's range leaves Android's display density. The file is watched,
@@ -22,10 +22,13 @@ use serde::Deserialize;
 const DPI: std::ops::RangeInclusive<u32> = 72..=1280;
 /// Wayland fractional scales are in 120ths.
 const SCALE_DENOMINATOR: f64 = 120.0;
-/// The density per unit of scale when nothing is chosen: 460 dpi at scale 2,
-/// which draws apps the size a stock Android phone does side by side.
-/// Android's own 160 per scale drew them smaller than the host's.
-pub(crate) const DEFAULT_DPI_PER_SCALE: f64 = 230.0;
+/// The density per unit of scale when nothing is chosen: Android's own 160,
+/// so one dp is one logical pixel of the host, the unit GTK, Qt and Denial's
+/// Flutter shell size their text and controls in, and Android apps match
+/// them at every scale (320 dpi at scale 2). Upstream's 230 matched a stock
+/// Android phone held beside Denial's phone shell; on the OnePlus Pad 3 it
+/// drew Android text 1.35 to 1.65 times the size of GTK's at the same scale.
+pub(crate) const DEFAULT_DPI_PER_SCALE: f64 = 160.0;
 
 #[derive(Default, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -167,9 +170,10 @@ mod tests {
 
     #[test]
     fn nothing_set_takes_the_default() {
-        assert_eq!(dpi(&File::default(), Some("DSI-1"), 240), 460);
+        assert_eq!(dpi(&File::default(), Some("DSI-1"), 240), 320);
+        assert_eq!(dpi(&File::default(), Some("DSI-1"), 300), 400);
         let file: File = serde_json::from_str(r#"{"outputs": {"DP-1": 200}}"#).unwrap();
-        assert_eq!(dpi(&file, Some("HDMI-A-1"), 120), 230);
+        assert_eq!(dpi(&file, Some("HDMI-A-1"), 120), 160);
     }
 
     #[test]

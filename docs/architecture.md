@@ -381,15 +381,16 @@ reloads its cached mode period. Disabled clocks remain disabled.
 The same output picks the task's density. The presenter reads
 `$XDG_CONFIG_HOME/droidloom/density-v1.json`, which gives dots per inch per unit
 of output scale: `dpiPerScale` for every output and `outputs` by connector name
-for one. A task on an output of scale 1.5 with 230 per scale gets 345 dpi, so
+for one. A task on an output of scale 1.5 with 160 per scale gets 240 dpi, so
 its contents keep their logical size on every screen. The private protocol
 carries it as `Density` (minor 11, capability `TASK_DENSITY`), sent before the
 configure it belongs to; the framework sets it as the task's requested
 `densityDpi` override, or drops the override for 0 or the display's own
 density. The file is watched, so a change reaches open windows at once.
-Without it, a task gets 230 per unit of scale. Since a task's density
-overrides the display's, `droidloomctl dpi` writes `dpiPerScale` along with
-the display density, creating the file when missing.
+Without it, a task gets 160 per unit of scale: one dp is one logical pixel of
+the host, so Android apps match GTK and the shell at every scale. Since a
+task's density overrides the display's, `droidloomctl dpi` writes
+`dpiPerScale` along with the display density, creating the file when missing.
 
 A window's density is known only once the window exists, after its activity
 started, and a density that arrives then is a configuration change: Android
