@@ -38,6 +38,7 @@ named:
 | `eb6` | `droidloom-package-helper prepare` says why pkexec ran no setup: its dialog dismissed (126), authorization not obtained or no agent (127), or the setup's own failure | `4c651ec` |
 | `eb6` | `droidloomctl install` starts a stopped Droidloom as a launch does, and sets it up first where it never was (`start`'s `prepare`, which asks for an administrator through polkit); it names the app it installed or updated, from the launcher entry that is new or has a new `icon_key` (which carries the package's last update time); `--notify` follows the start, setup and install in one desktop notification that ends with that name or the reason it failed | `1019dad` |
 | `eb6` | not a program: the desktop entry `droidloom-install-apk.desktop` ([below](#the-apk-desktop-entry)) | `2822b9c` |
+| `eb7` | a task without a density of its own takes Android's 160 dpi per unit of output scale, not 230: one dp is one logical pixel of the host, so Android apps match GTK and Denial's shell at every scale (Denial eb19's one scale per display) | `66ef5ac` |
 
 Android itself (`droidloom-image`, `droidloom-base`) is not changed, so it is
 not rebuilt: that is an AOSP build of tens of gigabytes and hours
