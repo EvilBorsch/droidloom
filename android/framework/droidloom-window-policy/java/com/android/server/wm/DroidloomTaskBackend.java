@@ -50,6 +50,10 @@ final class DroidloomTaskBackend {
     // Tasks with a shown FLAG_KEEP_SCREEN_ON window, as of the last surface placement.
     private final IdentityHashMap<Task, Boolean> mKeepScreenOn = new IdentityHashMap<>();
     private final IdentityHashMap<Task, Boolean> mPlacedKeepScreenOn = new IdentityHashMap<>();
+    // Pixels of each task the host's on-screen keyboard covers, under mService.mGlobalLock.
+    private final IdentityHashMap<Task, Integer> mKeyboardInsets = new IdentityHashMap<>();
+    // The bounds the host's window gave each task, under mService.mGlobalLock.
+    private final IdentityHashMap<Task, Rect> mHostBounds = new IdentityHashMap<>();
     // Accessed only on mWorker. Background tasks retain their existing host window.
     private final IdentityHashMap<Task, Snapshot> mPublished = new IdentityHashMap<>();
     private final IdentityHashMap<Task, Snapshot> mInputPublished = new IdentityHashMap<>();
@@ -116,11 +120,38 @@ final class DroidloomTaskBackend {
         thread.start();
         mWorker = new Handler(thread.getLooper());
         new DroidloomFrameworkControl(service, this);
+        synchronized (service.mGlobalLock) {
+            // The last one registered is asked first.
+            service.mTaskSupervisor.getLaunchParamsController()
+                    .registerModifier(this::hostBounds);
+        }
         schedule();
         mWorker.postDelayed(mHealth, 5000);
         // This receiver sleeps in native socket I/O at idle. It never performs
         // publication or holds WMS's lock while waiting/acknowledging records.
         new Thread(this::receiveCommands, TAG + "Control").start();
+    }
+
+    /**
+     * Android lays a task out again whenever an activity is started into it,
+     * as when its app is opened while it runs, and would give it the bounds
+     * the app's manifest asks for. The host's window does not follow, so a
+     * task the host has sized keeps those bounds.
+     */
+    private int hostBounds(Task task, ActivityInfo.WindowLayout layout, ActivityRecord activity,
+            ActivityRecord source, ActivityOptions options, ActivityStarter.Request request,
+            int phase, LaunchParamsController.LaunchParams current,
+            LaunchParamsController.LaunchParams out) {
+        final Rect bounds = task == null
+                || phase != LaunchParamsController.LaunchParamsModifier.PHASE_BOUNDS
+                ? null : mHostBounds.get(task);
+        if (bounds == null) return LaunchParamsController.LaunchParamsModifier.RESULT_SKIP;
+        out.set(current);
+        out.mBounds.set(bounds);
+        out.mBoundsSet = true;
+        out.mWindowingMode = task.getWindowingMode();
+        out.mPreferredTaskDisplayArea = task.getDisplayArea();
+        return LaunchParamsController.LaunchParamsModifier.RESULT_DONE;
     }
 
     // Notification hooks may run under WMS locks: only enqueue/coalesce here.
@@ -183,6 +214,8 @@ final class DroidloomTaskBackend {
             }, true);
             mIncarnations.keySet().retainAll(live.keySet());
             mCreatedOver.keySet().retainAll(live.keySet());
+            mKeyboardInsets.keySet().retainAll(live.keySet());
+            mHostBounds.keySet().retainAll(live.keySet());
         }
         return tasks;
     }
@@ -292,6 +325,7 @@ final class DroidloomTaskBackend {
                     if (command[5] <= 0 || command[5] > 16384
                             || command[6] <= 0 || command[6] > 16384) return;
                     final Rect bounds = new Rect(0, 0, (int) command[5], (int) command[6]);
+                    mHostBounds.put(task, bounds);
                     if (task.getBounds().equals(bounds)) return;
                     task.setResizeMode(ActivityInfo.RESIZE_MODE_RESIZEABLE);
                     // Direct call in system_server: preserve ATMS's existing
@@ -317,6 +351,10 @@ final class DroidloomTaskBackend {
                 case 6:
                     if (command[5] != 0 && (command[5] < 72 || command[5] > 1280)) return;
                     setHostDensity(task, (int) command[5]);
+                    break;
+                case 8:
+                    if (command[5] < 0 || command[5] > 16384) return;
+                    setHostKeyboardInset(task, (int) command[5]);
                     break;
                 default:
                     throw new IllegalArgumentException("Unknown host window command");
@@ -363,6 +401,30 @@ final class DroidloomTaskBackend {
             if (r.isVisibleRequested()) r.ensureActivityConfiguration(true /* ignoreVisibility */);
         });
         mService.mWindowManager.mWindowPlacerLocked.requestTraversal();
+    }
+
+    /**
+     * How much of the task's bottom edge the host's on-screen keyboard covers,
+     * in pixels. InsetsPolicy gives the task's windows an IME source of that
+     * height. Under mService.mGlobalLock.
+     */
+    int keyboardInset(Task task) {
+        final Integer height = mKeyboardInsets.get(task);
+        return height == null ? 0 : height;
+    }
+
+    /**
+     * The host's on-screen keyboard moved: the task's windows get their insets
+     * again, as when Android's own keyboard shows or hides. The host no longer
+     * moves the window, so the app makes room above the keyboard itself.
+     */
+    private void setHostKeyboardInset(Task task, int height) {
+        if (keyboardInset(task) == height) return;
+        if (height == 0) mKeyboardInsets.remove(task);
+        else mKeyboardInsets.put(task, height);
+        task.forAllWindows(w -> {
+            if (w.isReadyToDispatchInsetsState()) w.notifyInsetsChanged();
+        }, true /* traverseTopToBottom */);
     }
 
     /**

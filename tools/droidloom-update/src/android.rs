@@ -408,6 +408,14 @@ const PATCHES: &[(&str, &str)] = &[
         "frameworks/base",
         "android/framework/0009-droidloom-host-fingerprint-enrollment.patch",
     ),
+    (
+        "frameworks/base",
+        "android/framework/0010-droidloom-host-keyboard-notification.patch",
+    ),
+    (
+        "frameworks/base",
+        "android/framework/0011-droidloom-no-boot-brightness-override.patch",
+    ),
 ];
 #[derive(Serialize, Deserialize)]
 struct Original {

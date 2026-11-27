@@ -13,6 +13,7 @@ mod imports;
 mod input;
 mod input_time;
 mod insets;
+mod keyboard_layout;
 mod layers;
 mod notifications;
 mod presentation_audit;
@@ -302,6 +303,13 @@ struct TaskWindow {
     /// The Android window hid the status bar, and the toplevel asked to be
     /// fullscreen. The compositor decides; this only avoids repeating.
     fullscreen: bool,
+    /// Present while Android lays the window out around the on-screen
+    /// keyboard instead of the compositor moving it.
+    keyboard_inset: Option<insets::DenialKeyboardInsetV1>,
+    /// The keyboard's covered height in logical pixels, as last reported.
+    keyboard_logical: u32,
+    /// The covered height last sent to Android, in buffer pixels.
+    keyboard_sent: Option<u32>,
     unmap_requested: bool,
     closing: bool,
 }
@@ -368,6 +376,9 @@ struct App {
     clipboard: clipboard::Clipboard,
     clipboard_inputs: VecDeque<(TaskObjectId, InputEvent, u64)>,
     text_input: text_input::TextInput,
+    /// Android's hint for each group of the host keymap, and the active group.
+    keyboard_groups: Vec<keyboard_layout::Hint>,
+    keyboard_group: u32,
     registry_state: RegistryState,
     output_state: OutputState,
     output_power_manager: Option<ZwlrOutputPowerManagerV1>,
@@ -639,6 +650,35 @@ impl App {
             .map(|(_, dpi)| dpi)
     }
 
+    /// Tells Android how much of the task the on-screen keyboard covers, in
+    /// the task's buffer pixels, when that changed.
+    fn update_task_keyboard_inset(&mut self, object: TaskObjectId) -> Result<(), PresenterError> {
+        let Some(task) = self.tasks.get(&object) else {
+            return Ok(());
+        };
+        if task.keyboard_inset.is_none() || task.closing || task.configure_serial == 0 {
+            return Ok(());
+        }
+        let height = u32::try_from(
+            (u64::from(task.keyboard_logical) * u64::from(task.applied_scale_120)
+                + u64::from(FRACTIONAL_SCALE_DENOMINATOR / 2))
+                / u64::from(FRACTIONAL_SCALE_DENOMINATOR),
+        )
+        .unwrap_or(u32::MAX)
+        .min(task.buffer_size.1);
+        if task.keyboard_sent == Some(height) {
+            return Ok(());
+        }
+        self.endpoint
+            .as_ref()
+            .ok_or(PresenterError::Configuration("endpoint disappeared"))?
+            .send_keyboard_inset(object, height)?;
+        if let Some(task) = self.tasks.get_mut(&object) {
+            task.keyboard_sent = Some(height);
+        }
+        Ok(())
+    }
+
     fn update_task_refresh(&mut self, object: TaskObjectId) -> Result<(), PresenterError> {
         self.update_task_density(object)?;
         let refresh = self.task_refresh_millihz(object);
@@ -841,54 +881,70 @@ impl App {
         if !headless && let Err(error) = self.window_policy.reload_policy() {
             eprintln!("Droidloom kept the last valid window policy: {error}");
         }
-        let (window, decoration, viewport, fractional_scale, sync_surface) = if headless {
-            (None, None, None, None, None)
-        } else {
-            let surface = self.compositor.create_surface(qh);
-            // The compositor draws the titlebar that moves the window: the
-            // whole surface belongs to the Android app. One without
-            // xdg-decoration leaves the window undecorated. The decoration is
-            // ours rather than SCTK's: SCTK destroys it only when its last
-            // Window clone drops, after we have destroyed the toplevel.
-            let window = self
-                .xdg_shell
-                .create_window(surface, WindowDecorations::None, qh);
-            let decoration =
-                ProvidesBoundGlobal::<ZxdgDecorationManagerV1, 1>::bound_global(&self.xdg_shell)
-                    .ok()
-                    .map(|manager| {
-                        let decoration =
-                            manager.get_toplevel_decoration(window.xdg_toplevel(), qh, ());
-                        decoration.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSide);
-                        decoration
-                    });
-            window.set_title(self.titles.title(package));
-            window.set_app_id(package.to_owned());
-            window.set_min_size(Some((1, 1)));
-            if let Some(manager) = &self.insets_manager {
-                manager.set_self_managed(window.wl_surface());
-            }
-            // fractional-scale-v1 keeps the wl_surface at scale 1 and uses a
-            // viewport to map the higher-resolution buffer into XDG logical
-            // coordinates.
-            window.wl_surface().set_buffer_scale(1);
-            let viewport = self.viewporter.get_viewport(window.wl_surface(), qh, ());
-            let fractional_scale =
-                self.fractional_scale_manager
-                    .get_fractional_scale(window.wl_surface(), qh, object);
-            let sync_surface = self
-                .sync_manager
-                .as_ref()
-                .map(|manager| manager.get_surface(window.wl_surface(), qh, ()));
-            window.commit();
-            (
-                Some(window),
-                decoration,
-                Some(viewport),
-                Some(fractional_scale),
-                sync_surface,
-            )
-        };
+        let (window, decoration, viewport, fractional_scale, sync_surface, keyboard_inset) =
+            if headless {
+                (None, None, None, None, None, None)
+            } else {
+                let surface = self.compositor.create_surface(qh);
+                // The compositor draws the titlebar that moves the window: the
+                // whole surface belongs to the Android app. One without
+                // xdg-decoration leaves the window undecorated. The decoration is
+                // ours rather than SCTK's: SCTK destroys it only when its last
+                // Window clone drops, after we have destroyed the toplevel.
+                let window = self
+                    .xdg_shell
+                    .create_window(surface, WindowDecorations::None, qh);
+                let decoration = ProvidesBoundGlobal::<ZxdgDecorationManagerV1, 1>::bound_global(
+                    &self.xdg_shell,
+                )
+                .ok()
+                .map(|manager| {
+                    let decoration = manager.get_toplevel_decoration(window.xdg_toplevel(), qh, ());
+                    decoration.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+                    decoration
+                });
+                window.set_title(self.titles.title(package));
+                window.set_app_id(package.to_owned());
+                window.set_min_size(Some((1, 1)));
+                if let Some(manager) = &self.insets_manager {
+                    manager.set_self_managed(window.wl_surface());
+                }
+                // Only when Android can take the keyboard's height; otherwise the
+                // compositor keeps moving the window clear of the keyboard.
+                let keyboard_inset = self
+                    .insets_manager
+                    .as_ref()
+                    .filter(|manager| manager.version() >= 2)
+                    .filter(|_| {
+                        self.endpoint
+                            .as_ref()
+                            .is_some_and(DenialEndpoint::keyboard_inset)
+                    })
+                    .map(|manager| manager.get_keyboard_inset(window.wl_surface(), qh, object));
+                // fractional-scale-v1 keeps the wl_surface at scale 1 and uses a
+                // viewport to map the higher-resolution buffer into XDG logical
+                // coordinates.
+                window.wl_surface().set_buffer_scale(1);
+                let viewport = self.viewporter.get_viewport(window.wl_surface(), qh, ());
+                let fractional_scale = self.fractional_scale_manager.get_fractional_scale(
+                    window.wl_surface(),
+                    qh,
+                    object,
+                );
+                let sync_surface = self
+                    .sync_manager
+                    .as_ref()
+                    .map(|manager| manager.get_surface(window.wl_surface(), qh, ()));
+                window.commit();
+                (
+                    Some(window),
+                    decoration,
+                    Some(viewport),
+                    Some(fractional_scale),
+                    sync_surface,
+                    keyboard_inset,
+                )
+            };
         self.tasks.insert(
             object,
             TaskWindow {
@@ -930,6 +986,9 @@ impl App {
                 hide_due: None,
                 idle_inhibitor: None,
                 fullscreen: false,
+                keyboard_inset,
+                keyboard_logical: 0,
+                keyboard_sent: None,
                 unmap_requested: false,
                 closing: false,
             },
@@ -1043,6 +1102,7 @@ impl App {
             }
         }
         self.update_task_density(object)?;
+        self.update_task_keyboard_inset(object)?;
         self.endpoint
             .as_mut()
             .ok_or(PresenterError::Configuration("endpoint disappeared"))?
@@ -1687,6 +1747,9 @@ impl App {
             if let Some(inhibitor) = task.idle_inhibitor.take() {
                 inhibitor.destroy();
             }
+            if let Some(inset) = task.keyboard_inset.take() {
+                inset.destroy();
+            }
             for (_, target) in task.targets {
                 if let Some(buffer) = target.wayland {
                     buffer.destroy();
@@ -1999,6 +2062,17 @@ impl App {
                     .with_task_density()
                     .with_task_parents()
                     .with_task_fullscreen();
+                // Only a compositor that reports its keyboard's height lets
+                // Android lay windows out around it.
+                let endpoint = if self
+                    .insets_manager
+                    .as_ref()
+                    .is_some_and(|manager| manager.version() >= 2)
+                {
+                    endpoint.with_task_keyboard_inset()
+                } else {
+                    endpoint
+                };
                 let endpoint = if self.idle_inhibit_manager.is_some() {
                     endpoint.with_keep_screen_on()
                 } else {
@@ -2445,6 +2519,28 @@ impl CompositorHandler for App {
         }
         if let Err(error) = self.update_task_refresh(object) {
             self.fail(&error);
+        }
+    }
+}
+
+impl Dispatch<insets::DenialKeyboardInsetV1, TaskObjectId> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &insets::DenialKeyboardInsetV1,
+        event: insets::denial_keyboard_inset_v1::Event,
+        object: &TaskObjectId,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // Android takes the settled height when the motion starts; the
+        // motion's duration is not forwarded.
+        let insets::denial_keyboard_inset_v1::Event::Inset { height, .. } = event;
+        let Some(task) = state.tasks.get_mut(object) else {
+            return;
+        };
+        task.keyboard_logical = height;
+        if let Err(error) = state.update_task_keyboard_inset(*object) {
+            state.fail(&error);
         }
     }
 }
@@ -3189,8 +3285,27 @@ impl KeyboardHandler for App {
         _serial: u32,
         _modifiers: Modifiers,
         _raw_modifiers: RawModifiers,
-        _layout: u32,
+        layout: u32,
     ) {
+        // The active group: switching layouts on the host switches Android's.
+        self.keyboard_group = layout;
+        let hint = self.keyboard_groups.get(layout as usize).copied();
+        self.text_input.set_keyboard_layout(hint);
+    }
+
+    fn update_keymap(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        keymap: smithay_client_toolkit::seat::keyboard::Keymap<'_>,
+    ) {
+        self.keyboard_groups = keyboard_layout::groups(&keymap.as_string());
+        let hint = self
+            .keyboard_groups
+            .get(self.keyboard_group as usize)
+            .copied();
+        self.text_input.set_keyboard_layout(hint);
     }
 
     fn update_repeat_info(
@@ -3597,6 +3712,8 @@ fn run() -> Result<(), PresenterError> {
             socket_path.with_file_name("text-input.sock"),
             globals.bind(&qh, 1..=1, ()).ok(),
         )?,
+        keyboard_groups: Vec::new(),
+        keyboard_group: 0,
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
         output_power_manager,
@@ -3611,7 +3728,7 @@ fn run() -> Result<(), PresenterError> {
         feedback: None,
         compositor,
         xdg_shell,
-        insets_manager: globals.bind(&qh, 1..=1, ()).ok(),
+        insets_manager: globals.bind(&qh, 1..=2, ()).ok(),
         frame_timeline_manager: globals.bind(&qh, 1..=1, ()).ok(),
         clock: clock::Clock::new(),
         viewporter,

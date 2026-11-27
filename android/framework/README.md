@@ -29,6 +29,13 @@ root/system. Regenerate them with `python3 tools/droidloom-systemui-stubs` when
 advancing the pinned framework interfaces; `--check` verifies the checked-in
 adapters. The updater also checks their source hashes against the build inputs.
 
+Android's music volume and screen brightness follow the host. Android's volume curve plays music
+at full scale, SystemUI's `HostVolume` passes the music volume to the host's
+default output and back, and `HostBrightness` passes Android's brightness setting
+and any window's brightness to the backlight, both over host channels to the
+user's brokers; the host's own changes come back. See the runtime layout
+contract, "Media volume and screen brightness".
+
 Biometric prompts open no window: the host marks the sensor and runs the reader
 (under Denial, through `denial-fingerprint-verify-v1`), so the asking app stays
 in front. SystemUI starts the sensor at once, answers a match as confirmed and
@@ -107,6 +114,18 @@ it, and drops it when the host has no fingers or Android no credential. The HAL
 replaces `generation` in `/data/vendor/droidloom-authentication` when the
 enrollment or its authenticator ID changes; the provider then enumerates again
 and reloads the authenticator IDs.
+
+`0010-droidloom-host-keyboard-notification.patch` keeps the Droidloom host
+keyboard out of Android's keyboard layout notification. Its layout comes from
+the host through the input method's subtype
+([text input](../../docs/contracts/text-input-v1.md#host-keyboard-layout)), so
+Android neither asks to configure it nor reports the layout it chose.
+
+`0011-droidloom-no-boot-brightness-override.patch` drops PowerManagerService's
+boot brightness override, which holds Android's default brightness until boot
+completes to match a bootloader picture a cell does not have. Android reports
+every override as a window's, and SystemUI gives a window's level to the host's
+backlight, so the host's screen flashed to that default at each start.
 
 `DroidloomCredential` gives Android user 0 a random 32-character password that
 nobody types. The lifecycle daemon keeps it beside the cell's storage on the

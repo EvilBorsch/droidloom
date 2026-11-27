@@ -425,8 +425,10 @@ fallback can remain useful where the direct path is unavailable.
 
 The existing [audio bridge](audio-integration-proposal.md) remains the baseline
 for comparison. Physical routing stays with PipeWire and its session manager.
-An Android volume or mute operation must not silently change unrelated Linux
-applications. See [AOSP audio architecture](https://source.android.com/docs/core/audio).
+Android's media volume is the host's default output volume, as a native
+player's volume control is: an app that changes it changes the host's
+([runtime layout](contracts/runtime-layout-v1.md), "Media volume and screen
+brightness"). Android's master volume and mute stay on Droidloom's own PCM. See [AOSP audio architecture](https://source.android.com/docs/core/audio).
 
 ## Shared identity and independent service lifetimes
 
@@ -557,7 +559,10 @@ are no duplicate bars or inaccessible content edges.
 Reflect output changes, available work area, scale and orientation through
 Android configuration and real layout. Each task gets the density of the output
 it is on as a task configuration override (see the architecture's refresh and
-density section). Use host-provided insets where supported
+density section). Where the compositor reports its on-screen keyboard's height
+per window, Android lays the task out around it as around its own keyboard
+(see the architecture's on-screen keyboard section); elsewhere the compositor
+moves the window. Use host-provided insets where supported
 and keep an explicit fallback elsewhere. The current
 [fixed inset policy](contracts/navigation-insets.md) is a baseline, not the final
 desktop geometry contract.

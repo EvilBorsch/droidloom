@@ -19,6 +19,10 @@ covers hide-then-restart behavior on the host JVM.
 
 IMMS annotates EditorInfo with the task ID of its validated editor window;
 WMS checks that window's owner UID and resolves the exact task without enumeration.
+An app that restarts its own editor (`invalidateInput`, as a text field does when
+its text is replaced) hands the IME its own copy of EditorInfo, without that
+annotation: the IME keeps the task of the editor being restarted (`EditorTaskTest`).
+A show request for an editor without a task cannot reach the host and is logged.
 The IME authenticates system_server's setup socket, and system_server checks the
 IME's installed PackageManager UID before delegating a connected host descriptor.
 Bounded JSON records then travel directly between the IME and presenter.
@@ -44,6 +48,29 @@ Password fields advertise sensitive/hidden text hints. This first bridge does
 not export surrounding text, cursor rectangles, selection, or editor-action
 metadata; full prediction/context and precise IME candidate placement remain
 future work. Physical key delivery remains on the existing routed-key path.
+
+## Host keyboard layout
+
+The same connection carries the host keyboard's layout to the input method as
+`{"keyboard_layout":{"language":TAG,"type":TYPE}}`, once when the IME connects
+and whenever the host keymap or its active group changes. The presenter reads
+each group's layout from the keymap's `xkb_symbols` name, the RMLVO symbols the
+compositor compiled it from, and names the Android layout of the same keys as
+a BCP 47 language tag and one of Android's layout types (`qwerty`, `azerty`,
+`qwertz`, `dvorak`, `colemak`, `workman`, `turkish_q`, `turkish_f`, `extended`,
+`undefined`). A layout Android has none for types as US English.
+
+The IME replaces its additional subtype with one whose physical keyboard hint
+is that tag and type, and switches to it once Android has attached the IME
+(its first editor start). The switch always names a subtype ID other than the
+current one: the layout manager hears of a subtype only when the selection
+changes, and a start restores the saved one without telling it.
+Android's `KeyboardLayoutManager`
+picks the host keyboard's layout from the current subtype's hint, as it does
+for any input method, and key events are injected as that keyboard: apps read
+characters from that layout, and its key map moves keys where the layout does
+(AZERTY, QWERTZ). `0010-droidloom-host-keyboard-notification.patch` keeps the
+keyboard out of Android's keyboard layout notification.
 
 The [Rust package builder](../../packaging/arch/README.md) builds the IME,
 framework services, IME, SystemUI, task launcher and Composer endpoint together. Task registration
